@@ -1,8 +1,18 @@
+/**
+ * POST /api/publish-post
+ *
+ * Publishes a single platform draft.
+ * Looks up the stored OAuth token for the platform from the database,
+ * runs the AI safety filter, then calls the real platform REST API
+ * (or a mock if SOCIAL_PUBLISH_MOCK=true, which is the default).
+ *
+ * Body: { draft: PublishPostRequest }
+ * Response: PublishPostResponse
+ */
 import type { NextApiRequest, NextApiResponse } from "next";
 import type { PublishPostRequest, PublishPostResponse } from "@/types/autoPosting";
-
-// Set to false and add real OAuth credentials when ready to go live
-const MOCK_MODE = true;
+import { publishToSocialPlatform } from "@/services/socialPublisher";
+import prisma from "@/lib/prisma";
 
 export default async function handler(
   req: NextApiRequest,
@@ -18,54 +28,37 @@ export default async function handler(
     return res.status(400).json({ error: "platform and caption are required" });
   }
 
-  if (MOCK_MODE) {
-    const mockResponse: PublishPostResponse = {
-      draftId: draft.draftId,
-      success: true,
-      publishedAt: new Date().toISOString(),
-      mockPlatformPostId: `mock_${draft.platform}_${Date.now()}`,
-      errorMessage: null,
-    };
-    return res.status(200).json(mockResponse);
-  }
-
-  // ─── Real OAuth path ─────────────────────────────────────────────────────────
-  // Each case below is a stub — swap in the real platform SDK when OAuth is wired.
-  // Access tokens should come from a server-side session or encrypted cookie store.
   try {
-    switch (draft.platform) {
-      case "instagram":
-        // const igClient = new IgApiClient();
-        // await igClient.publish({ caption: draft.caption, mediaUrl: draft.mediaUrl, accessToken })
-        break;
+    // Look up the stored access token for this platform
+    const account = await prisma.socialAccount.findUnique({
+      where: { platform: draft.platform },
+    });
 
-      case "facebook":
-        // await facebookClient.postToPage({ message: draft.caption, accessToken })
-        break;
+    const result = await publishToSocialPlatform({
+      platform: draft.platform,
+      media_url: draft.mediaUrl ?? "",
+      caption: draft.caption,
+      hashtags: draft.hashtags ?? [],
+      accessToken: account?.accessToken,
+    });
 
-      case "linkedin":
-        // await linkedinClient.createPost({ text: draft.caption, accessToken })
-        break;
-
-      case "twitter":
-        // const twitterClient = new TwitterApi(accessToken);
-        // await twitterClient.v2.tweet(draft.caption)
-        break;
-
-      case "tiktok":
-        // await tiktokClient.postVideo({ caption: draft.caption, videoUrl: draft.mediaUrl, accessToken })
-        break;
-
-      default:
-        return res.status(400).json({ error: "Unsupported platform" });
+    if (result.safetyBlocked) {
+      const response: PublishPostResponse = {
+        draftId: draft.draftId,
+        success: false,
+        publishedAt: null,
+        mockPlatformPostId: null,
+        errorMessage: result.flagReason ?? "Content blocked by safety filter",
+      };
+      return res.status(200).json(response);
     }
 
     const response: PublishPostResponse = {
       draftId: draft.draftId,
-      success: true,
-      publishedAt: new Date().toISOString(),
-      mockPlatformPostId: null,
-      errorMessage: null,
+      success: result.success,
+      publishedAt: result.success ? new Date().toISOString() : null,
+      mockPlatformPostId: result.isMock ? (result.platform_post_id ?? null) : null,
+      errorMessage: result.success ? null : "Publish failed",
     };
     return res.status(200).json(response);
   } catch (err) {
@@ -77,6 +70,6 @@ export default async function handler(
       mockPlatformPostId: null,
       errorMessage: message,
     };
-    return res.status(200).json(response);
+    return res.status(500).json(response);
   }
 }

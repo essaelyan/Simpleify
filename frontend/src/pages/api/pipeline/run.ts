@@ -38,6 +38,43 @@ import prisma from "@/lib/prisma";
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
+// ─── Real data-source helpers (used in Step 5) ────────────────────────────────
+
+/**
+ * Fetches GA4 performance data via the internal API route so we reuse
+ * the same parsing and fallback logic in a single place.
+ */
+async function fetchRealGAData(dateRangeDays: number) {
+  const baseUrl = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : "http://localhost:3000";
+  const res = await fetch(`${baseUrl}/api/feedback/ga-insights`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dateRangeDays }),
+  });
+  if (!res.ok) throw new Error("GA4 fetch failed");
+  const { data } = await res.json() as { data: import("@/types/feedbackLoop").GAPerformanceData };
+  return data;
+}
+
+/**
+ * Fetches Instagram insights via the internal API route.
+ */
+async function fetchRealInstagramData(dateRangeDays: number) {
+  const baseUrl = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : "http://localhost:3000";
+  const res = await fetch(`${baseUrl}/api/feedback/instagram-insights`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dateRangeDays }),
+  });
+  if (!res.ok) throw new Error("Instagram insights fetch failed");
+  const { data } = await res.json() as { data: import("@/types/feedbackLoop").InstagramInsightsData };
+  return data;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface PipelineRunRequest {
@@ -328,8 +365,12 @@ export default async function handler(
     let feedbackHints: ContentOptimizationHints | undefined;
     try {
       // Use real data when env vars are configured, otherwise fall back to mock
-      const gaData = getMockGAData(dateRangeDays);      // TODO: swap with real GA4 client when GA4_PROPERTY_ID is set
-      const igData = getMockInstagramData(dateRangeDays); // TODO: swap with real IG Graph API when INSTAGRAM_ACCESS_TOKEN is set
+      const gaData = process.env.GA4_PROPERTY_ID
+        ? await fetchRealGAData(dateRangeDays)
+        : getMockGAData(dateRangeDays);
+      const igData = process.env.INSTAGRAM_ACCESS_TOKEN
+        ? await fetchRealInstagramData(dateRangeDays)
+        : getMockInstagramData(dateRangeDays);
 
       const optimizationPrompt = buildOptimizationPrompt(gaData, igData);
       const optimizationResponse = await anthropic.messages.create({
