@@ -8,7 +8,7 @@ import type {
   PostStatus,
 } from "@/types/autoPosting";
 import { generateContent, checkSafetyAdvanced, publishPost } from "@/api/autoPosting";
-import { fetchLatestHints, optimizeContent } from "@/api/feedbackLoop";
+import { fetchLatestHints } from "@/api/feedbackLoop";
 import { useOptimizationStore } from "@/store/optimizationStore";
 import BriefForm from "@/components/autoPosting/BriefForm";
 import PipelineStatusCard from "@/components/autoPosting/PipelineStatusCard";
@@ -195,8 +195,8 @@ export default function AutoPostingPage() {
     if (!allTerminalInEffect) return;
     async function runFeedbackLoop() {
       try {
-        const result = await optimizeContent({ dateRangeDays: 30 });
-        if (result.hints) setHints(result.hints);
+        const hints = await fetchLatestHints();
+        if (hints) setHints(hints);
       } catch {
         // Non-critical — generation still succeeded
       }
