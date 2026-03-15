@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Env files
+.env
+.env.local
+.env.*.local
+
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/node_modules/
+frontend/dev.db
+frontend/dev.db-journal
+frontend/prisma/dev.db
+frontend/prisma/dev.db-journal
+
+# Generated Prisma client
+frontend/src/generated/
+
+# Storage
+storage/media/
+
+# Misc
+.DS_Store
+*.log
+*.tsbuildinfo

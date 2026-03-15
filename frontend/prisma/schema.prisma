@@ -1,0 +1,54 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model SocialPost {
+  id              String   @id @default(cuid())
+  userId          String?            // optional until auth layer is added
+  platform        String
+  mediaUrl        String
+  caption         String
+  hashtags        String             // JSON-stringified string[]
+  postStatus      String             // "published" | "failed" | "safety_blocked"
+  success         Boolean
+  platformPostId  String?
+  safetyBlocked   Boolean  @default(false)
+  flagReason      String?
+  createdAt       DateTime @default(now())
+
+  @@map("social_posts")
+}
+
+model SocialAccount {
+  id            String    @id @default(cuid())
+  platform      String    @unique   // one account per platform
+  accessToken   String              // store securely in production
+  refreshToken  String?
+  expiresAt     DateTime?
+  accountHandle String?             // e.g. "@username" for display
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@map("social_accounts")
+}
+
+model FeedbackSnapshot {
+  id        String   @id @default(cuid())
+  hints     String   // JSON-stringified ContentOptimizationHints
+  gaIsMock  Boolean  @default(true)
+  igIsMock  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@map("feedback_snapshots")
+}
