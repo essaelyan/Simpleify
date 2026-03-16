@@ -201,6 +201,12 @@ function log(message: string): void {
   console.log(`[pipeline] ${message}`);
 }
 
+/** Returns a function that yields elapsed milliseconds since stageTimer() was called. */
+function stageTimer(): () => number {
+  const t0 = Date.now();
+  return () => Date.now() - t0;
+}
+
 // ─── QA result adapter ────────────────────────────────────────────────────────
 
 function toQASummary(result: ContentQAResult | null, attempts: number): QASummary | null {
@@ -467,12 +473,14 @@ async function processPlatform(
     // Evaluates hook, CTA, readability, platform fit, brand alignment, duplication.
     // Revises once if verdict = "revise"; skips platform if verdict = "reject".
     plog(platform, "stage=qa");
+    const tQA = stageTimer();
     const {
       draft: qaDraft,
       qaResult,
       qaAttempts,
       rejected: qaRejected,
     } = await runQAWithRetry(enrichedBrief, draft, brandVoice, otherPlatformCaptions);
+    plog(platform, `[pipeline] stage=qa durationMs=${tQA()}`);
 
     if (qaRejected) {
       const record = await prisma.socialPost.create({
@@ -509,12 +517,14 @@ async function processPlatform(
     // Checks profanity, brand voice, duplicate content, spam, platform rules.
     // Injects correction hints and regenerates up to MAX_SAFETY_RETRIES times.
     plog(platform, "stage=safety");
+    const tSafety = stageTimer();
     const {
       draft: safeDraft,
       attempts: safetyAttempts,
       blocked,
       flagReason,
     } = await retryUntilSafe(enrichedBrief, qaDraft, brandVoice);
+    plog(platform, `[pipeline] stage=safety durationMs=${tSafety()}`);
 
     if (blocked) {
       const record = await prisma.socialPost.create({
@@ -681,6 +691,10 @@ export default async function handler(
 
   const startedAt = new Date().toISOString();
   const { brief, mediaUrl = "", dateRangeDays = 30 } = req.body as PipelineRunRequest;
+  // SKIP_FEEDBACK_LOOP=true omits Steps 5–7 (analytics fetch + Opus optimization +
+  // snapshot persist). Recommended for preview/staging to stay within 60 s budget.
+  const skipFeedbackLoop = process.env.SKIP_FEEDBACK_LOOP === "true";
+  if (skipFeedbackLoop) log("SKIP_FEEDBACK_LOOP=true — feedback steps 5–7 will be omitted");
 
   if (!brief?.topic || !brief?.selectedPlatforms?.length) {
     fail(res, 400, API_ERRORS.BAD_REQUEST, "brief.topic and brief.selectedPlatforms are required");
@@ -694,9 +708,11 @@ export default async function handler(
     // Loads the active BrandVoiceProfile from the DB. If none is configured,
     // null is passed through every downstream agent — all handle null gracefully.
     log("── Step 0: Loading brand voice ──────────────────────────────────────");
+    const tBrandVoice = stageTimer();
     const brandVoice = await loadActiveBrandVoice();
     const brandVoiceSummary = { loaded: brandVoice !== null, name: brandVoice?.name ?? null };
     log(brandVoice ? `brand voice: "${brandVoice.name}"` : "brand voice: not configured");
+    log(`[pipeline] stage=brand_voice durationMs=${tBrandVoice()}`);
 
     // ── Step 1: FeedbackSnapshot injection ───────────────────────────────────
     // Loads the most recent FeedbackSnapshot and injects its hints into the
@@ -729,6 +745,7 @@ export default async function handler(
     // Transforms the thin user brief into a strategically-grounded brief with
     // content angles, hooks, CTAs, and audience framing. Failure is non-fatal.
     log("── Step 1b: Brief Enrichment Agent ──────────────────────────────────");
+    const tEnrichment = stageTimer();
     const enrichmentResult = await enrichBrief(
       anthropic,
       enrichedBrief,
@@ -751,12 +768,14 @@ export default async function handler(
     } else {
       log(`enrichment: failed (${enrichmentResult.failReason ?? "unknown"}) — using original brief`);
     }
+    log(`[pipeline] stage=enrichment durationMs=${tEnrichment()}`);
 
     // ── Step 2: Content Generation Agent ──────────────────────────────────────
     // Owned by: contentGenerator.ts
     // Generates platform-specific captions via Opus. Injects brand voice,
     // enrichment context, feedback hints, and QA revision guidance into prompt.
     log("── Step 2: Generating content ───────────────────────────────────────");
+    const tGeneration = stageTimer();
     const { briefId, platforms: drafts } = await generateContentForBrief(
       anthropic,
       enrichedBrief,
@@ -767,6 +786,7 @@ export default async function handler(
     for (const d of drafts) {
       log(`  ${d.platform}: "${d.caption.slice(0, 80)}${d.caption.length > 80 ? "…" : ""}"`);
     }
+    log(`[pipeline] stage=generation durationMs=${tGeneration()}`);
 
     // ── Step 3: Load connected social accounts ────────────────────────────────
     // Loads all connected platform accounts once. Platforms without an account
@@ -782,6 +802,7 @@ export default async function handler(
     // Each platform runs independently in parallel: QA → safety → publish.
     // processPlatform() is the single entry point; it never throws.
     log("── Step 4: Per-platform processing (parallel) ───────────────────────");
+    const tPlatforms = stageTimer();
     const allCaptions = drafts.map((d) => d.caption);
 
     const platforms: PlatformPipelineResult[] = await Promise.all(
@@ -797,58 +818,65 @@ export default async function handler(
         );
       })
     );
+    log(`[pipeline] stage=platform_processing durationMs=${tPlatforms()}`);
 
-    // ── Step 5: Analytics data fetch ──────────────────────────────────────────
-    // Owned by: analyticsDataService.ts
-    // Direct service calls — no internal HTTP round-trips.
-    // Falls back to mock data when env vars are not configured.
-    log("── Step 5: Fetching analytics data ──────────────────────────────────");
     let feedbackHints: ContentOptimizationHints | null = null;
     let feedbackDataSources: PipelineRunData["feedbackDataSources"] = null;
 
-    try {
-      const [gaData, igData] = await Promise.all([
-        fetchGAData(dateRangeDays),
-        fetchInstagramData(dateRangeDays),
-      ]);
-      log(`GA4:       isMock=${gaData.isMock}  sessions=${gaData.totalSessions}`);
-      log(`Instagram: isMock=${igData.isMock}  posts=${igData.totalPosts}  avgEngagement=${igData.avgEngagementRate.toFixed(2)}%`);
+    if (skipFeedbackLoop) {
+      log("── Steps 5–7: Feedback loop SKIPPED (SKIP_FEEDBACK_LOOP=true) ───────");
+    } else {
+      // ── Step 5: Analytics data fetch ────────────────────────────────────────
+      // Owned by: analyticsDataService.ts
+      // Direct service calls — no internal HTTP round-trips.
+      // Falls back to mock data when env vars are not configured.
+      log("── Step 5: Fetching analytics data ──────────────────────────────────");
+      const tFeedback = stageTimer();
+      try {
+        const [gaData, igData] = await Promise.all([
+          fetchGAData(dateRangeDays),
+          fetchInstagramData(dateRangeDays),
+        ]);
+        log(`GA4:       isMock=${gaData.isMock}  sessions=${gaData.totalSessions}`);
+        log(`Instagram: isMock=${igData.isMock}  posts=${igData.totalPosts}  avgEngagement=${igData.avgEngagementRate.toFixed(2)}%`);
 
-      feedbackDataSources = {
-        ga: { isMock: gaData.isMock, sessions: gaData.totalSessions },
-        instagram: { isMock: igData.isMock, posts: igData.totalPosts, avgEngagement: igData.avgEngagementRate },
-      };
+        feedbackDataSources = {
+          ga: { isMock: gaData.isMock, sessions: gaData.totalSessions },
+          instagram: { isMock: igData.isMock, posts: igData.totalPosts, avgEngagement: igData.avgEngagementRate },
+        };
 
-      // ── Step 6: Feedback Optimization Agent ──────────────────────────────
-      // Owned by: feedbackLoop.ts (Opus)
-      // Synthesizes GA + Instagram data into actionable ContentOptimizationHints.
-      log("── Step 6: Feedback Optimization Agent ──────────────────────────────");
-      const optimizationPrompt = buildOptimizationPrompt(gaData, igData);
-      const optimizationResponse = await anthropic.messages.create({
-        model: "claude-opus-4-6",
-        max_tokens: 2048,
-        messages: [{ role: "user", content: optimizationPrompt }],
-      });
-      const rawText = optimizationResponse.content
-        .filter((b) => b.type === "text")
-        .map((b) => (b as { type: "text"; text: string }).text)
-        .join("");
-      feedbackHints = parseOptimizationResponse(rawText, gaData, igData);
+        // ── Step 6: Feedback Optimization Agent ────────────────────────────
+        // Owned by: feedbackLoop.ts (Opus)
+        // Synthesizes GA + Instagram data into actionable ContentOptimizationHints.
+        log("── Step 6: Feedback Optimization Agent ──────────────────────────────");
+        const optimizationPrompt = buildOptimizationPrompt(gaData, igData);
+        const optimizationResponse = await anthropic.messages.create({
+          model: "claude-opus-4-6",
+          max_tokens: 2048,
+          messages: [{ role: "user", content: optimizationPrompt }],
+        });
+        const rawText = optimizationResponse.content
+          .filter((b) => b.type === "text")
+          .map((b) => (b as { type: "text"; text: string }).text)
+          .join("");
+        feedbackHints = parseOptimizationResponse(rawText, gaData, igData);
 
-      // ── Step 7: Persist FeedbackSnapshot ─────────────────────────────────
-      // Saved so the next pipeline run auto-loads it in Step 1.
-      log("── Step 7: Persisting FeedbackSnapshot ──────────────────────────────");
-      await prisma.feedbackSnapshot.create({
-        data: {
-          hints: JSON.stringify(feedbackHints),
-          gaIsMock: gaData.isMock,
-          igIsMock: igData.isMock,
-        },
-      });
-      log("feedback snapshot saved");
-    } catch (err) {
-      // Feedback loop is non-critical — pipeline result is still returned.
-      log(`feedback loop failed: ${err instanceof Error ? err.message : String(err)} — skipping`);
+        // ── Step 7: Persist FeedbackSnapshot ──────────────────────────────
+        // Saved so the next pipeline run auto-loads it in Step 1.
+        log("── Step 7: Persisting FeedbackSnapshot ──────────────────────────────");
+        await prisma.feedbackSnapshot.create({
+          data: {
+            hints: JSON.stringify(feedbackHints),
+            gaIsMock: gaData.isMock,
+            igIsMock: igData.isMock,
+          },
+        });
+        log("feedback snapshot saved");
+        log(`[pipeline] stage=feedback durationMs=${tFeedback()}`);
+      } catch (err) {
+        // Feedback loop is non-critical — pipeline result is still returned.
+        log(`[pipeline] stage=feedback durationMs=${tFeedback()} FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     const completedAt = new Date().toISOString();

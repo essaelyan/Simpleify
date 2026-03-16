@@ -51,6 +51,7 @@ step is needed for the current `db push` workflow.
 | `DATABASE_URL` | PostgreSQL connection string (`postgresql://...?sslmode=require`) |
 | `CLAUDE_API_KEY` | Anthropic API key. Missing → pipeline returns `CONFIG_ERROR 500` |
 | `SOCIAL_PUBLISH_MOCK` | `true` on all environments except production live publishing |
+| `SKIP_FEEDBACK_LOOP` | `true` skips Steps 5–7 (analytics + Opus optimization + snapshot). Recommended `true` for preview to stay within Vercel's 60 s budget. Defaults to `false`. |
 
 ### Optional — social platform publishing
 
@@ -89,6 +90,7 @@ Set these in the Vercel dashboard under **Environment Variables → Preview**.
 DATABASE_URL        postgresql://<preview-db-connection-string>
 CLAUDE_API_KEY      <your-anthropic-key>
 SOCIAL_PUBLISH_MOCK true
+SKIP_FEEDBACK_LOOP  true
 ```
 
 Use a dedicated preview database or Neon branch so preview deployments never
