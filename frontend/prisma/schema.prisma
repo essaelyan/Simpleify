@@ -16,7 +16,7 @@ model SocialPost {
   id              String   @id @default(cuid())
   userId          String?            // optional until auth layer is added
   platform        String
-  mediaUrl        String
+  mediaUrl        String?
   caption         String
   hashtags        String             // JSON-stringified string[]
   postStatus      String             // "published" | "failed" | "safety_blocked"
@@ -50,4 +50,23 @@ model FeedbackSnapshot {
   createdAt DateTime @default(now())
 
   @@map("feedback_snapshots")
+}
+
+model BrandVoice {
+  id                    String   @id @default(cuid())
+  name                  String   @default("Default Brand Voice")
+  industryNiche         String?
+  toneDescriptors       String   // JSON-stringified string[]
+  preferredWords        String   // JSON-stringified string[]
+  bannedWords           String   // JSON-stringified string[]
+  examplePosts          String   // JSON-stringified string[]
+  targetPersona         String?
+  formattingPreferences String?
+  emojiPolicy           String   @default("minimal") // "none" | "minimal" | "moderate" | "liberal"
+  ctaStyle              String?
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@map("brand_voices")
 }

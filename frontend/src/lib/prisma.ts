@@ -7,9 +7,13 @@
 
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/generated/prisma/client";
+import { requireEnv } from "@/lib/env";
 
 function createPrismaClient() {
-  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+  const connectionString = requireEnv("DATABASE_URL");
+
+  // PostgreSQL: use the pg driver adapter
+  const adapter = new PrismaPg({ connectionString });
   return new PrismaClient({ adapter });
 }
 

@@ -29,7 +29,9 @@ export type PostStatus =
   | "safety_checking"  // Safety filter API call in flight
   | "publishing"       // Publish API call in flight
   | "published"        // Successfully published
-  | "blocked"          // Safety filter rejected the content
+  | "blocked"          // Safety filter rejected after all retries
+  | "qa_rejected"      // Content QA Agent rejected after revision attempt
+  | "no_account"       // Content ready but no connected account for this platform
   | "failed";          // Generation or publish API errored
 
 // ─── Domain Objects ───────────────────────────────────────────────────────────
@@ -42,9 +44,15 @@ export interface PlatformDraft {
   status: PostStatus;
   scheduledAt: string | null;
   publishedAt: string | null;
+  /** Non-null when the publish was handled by the mock layer (dev/staging). */
+  mockPlatformPostId: string | null;
   errorMessage: string | null;
   safetyFlagReason: string | null;
   safetySeverity: "low" | "medium" | "high" | null;
+  /** QA Agent overall score (0-100). Set after /api/pipeline/run completes. */
+  qaScore?: number | null;
+  /** QA Agent verdict: "pass" | "revise" | "reject". Set after pipeline completes. */
+  qaVerdict?: string | null;
   // ContentCreator integration hooks (null until ContentCreator module is built)
   mediaUrl: string | null;
   mediaType: "image" | "video" | "carousel" | null;
@@ -60,6 +68,13 @@ export interface ContentBrief {
   sourceContentId: string | null;
   safetyFeedback: string | null;   // populated on retry; null on first attempt
   optimizationHints: import("@/types/feedbackLoop").ContentOptimizationHints | null;
+  /** Populated by the Brief Enrichment Agent (Agent C) before content generation.
+   *  Null when enrichment was skipped or failed — pipeline falls back gracefully. */
+  enrichment: import("@/types/briefEnrichment").BriefEnrichmentOutput | null;
+  /** Populated by the Content QA Agent (Agent D) when verdict = revise.
+   *  Injected into the regeneration prompt for that platform only.
+   *  Null on first attempt and when QA passes. */
+  qaRevisionGuidance: string | null;
 }
 
 export interface PostBrief extends ContentBrief {
@@ -151,11 +166,47 @@ export interface AdvancedSafetyResponse {
 
 // ─── Reducer Actions ──────────────────────────────────────────────────────────
 
+// ─── Pipeline result types (mirrors PlatformPipelineResult from /api/pipeline/run) ──
+
+/**
+ * Minimal shape of a single platform result returned by /api/pipeline/run.
+ * Used by PIPELINE_RESULT_RECEIVED to update the UI without importing the
+ * server-side API route types in every consumer.
+ */
+export interface PipelinePlatformResult {
+  platform: Platform;
+  /** Status as returned by the server-side pipeline. Mapped to PostStatus in the reducer. */
+  status: "published" | "safety_blocked" | "qa_rejected" | "no_account" | "failed";
+  caption: string | null;
+  hashtags: string[] | null;
+  qa: { verdict: string; overallScore: number; attempts: number } | null;
+  safety: { passed: boolean; attempts: number; flagReason: string | null } | null;
+  publish: { success: boolean; platformPostId: string | null; isMock: boolean } | null;
+  postId: string | null;
+  reason: string | null;
+}
+
+/** Payload dispatched when /api/pipeline/run returns successfully. */
+export interface PipelineCompletedPayload {
+  briefId: string | null;
+  enrichment: { success: boolean; summary: string | null } | null;
+  platforms: PipelinePlatformResult[];
+  feedbackHints: import("@/types/feedbackLoop").ContentOptimizationHints | null;
+}
+
 export type AutoPostingAction =
   | { type: "SET_LOADING"; payload: boolean }
   | { type: "SET_ERROR"; payload: string | null }
   | { type: "SET_ACTIVE_TAB"; payload: "setup" | "pipeline" | "history" }
   | { type: "PIPELINE_STARTED"; payload: PostBrief }
+  // ── Single-call pipeline result — replaces the old per-step action sequence ──
+  // /api/pipeline/run is now the single source of truth for Auto Posting.
+  | { type: "PIPELINE_RESULT_RECEIVED"; payload: PipelineCompletedPayload }
+  // ── DB history hydration on mount (GET /api/social/posts) ─────────────────
+  // Populates the history panel on page load so a browser refresh does not
+  // wipe visible history.  Only applied when session history is still empty.
+  | { type: "HISTORY_LOADED"; payload: PlatformDraft[] }
+  // ── Legacy per-step actions (kept for reducer completeness; no longer dispatched) ──
   | { type: "CONTENT_GENERATED"; payload: { draftId: string; caption: string; hashtags: string[] } }
   | { type: "SAFETY_CHECK_STARTED"; payload: { draftId: string } }
   | { type: "SAFETY_CHECK_PASSED"; payload: { draftId: string } }
