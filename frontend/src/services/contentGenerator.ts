@@ -197,11 +197,13 @@ export async function generateContentForBrief(
     .map((b) => (b as { type: "text"; text: string }).text)
     .join("");
 
-  // Strip markdown code fences if the model wraps the response
-  const cleaned = rawText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
-
-  // Throws SyntaxError on bad JSON — caller handles 422 response
-  const parsed: { platforms: GeneratedPlatformContent[] } = JSON.parse(cleaned);
+  // Extract the JSON object — handles code fences, preamble, and trailing text
+  // that the model sometimes emits despite "no explanation" instructions.
+  const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new SyntaxError("Content generation response contained no JSON object");
+  }
+  const parsed: { platforms: GeneratedPlatformContent[] } = JSON.parse(jsonMatch[0]);
 
   const briefId = Date.now().toString(36) + Math.random().toString(36).slice(2);
 

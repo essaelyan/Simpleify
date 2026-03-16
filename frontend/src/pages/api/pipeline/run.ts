@@ -399,13 +399,18 @@ async function runQAWithRetry(
     selectedPlatforms: [platform],
     qaRevisionGuidance: r1.revisionGuidance ?? null,
   };
-  const { platforms: regenerated } = await generateContentForBrief(
-    anthropic,
-    reviseBrief,
-    "claude-opus-4-6",
-    brandVoice
-  );
-  const revisedDraft = regenerated[0] ?? draft;
+  let revisedDraft = draft;
+  try {
+    const { platforms: regenerated } = await generateContentForBrief(
+      anthropic,
+      reviseBrief,
+      "claude-opus-4-6",
+      brandVoice
+    );
+    revisedDraft = regenerated[0] ?? draft;
+  } catch (reviseErr) {
+    plog(platform, `qa revise regeneration failed (${reviseErr instanceof Error ? reviseErr.message : "unknown"}) — using original draft`);
+  }
 
   // ── Pass 2 ────────────────────────────────────────────────────────────────
   const qa2 = await runContentQA(
