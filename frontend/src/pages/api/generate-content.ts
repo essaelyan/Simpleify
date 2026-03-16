@@ -1,32 +1,42 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { NextApiRequest, NextApiResponse } from "next";
 import type { ContentBrief, GenerateContentResponse } from "@/types/autoPosting";
+import type { ApiResponse } from "@/types/api";
+import { ok, fail } from "@/lib/apiResponse";
+import { API_ERRORS } from "@/types/api";
 import { generateContentForBrief } from "@/services/contentGenerator";
+import { loadActiveBrandVoice } from "@/services/brandVoiceService";
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse
+  res: NextApiResponse<ApiResponse<GenerateContentResponse>>
 ) {
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return fail(res, 405, API_ERRORS.METHOD_NOT_ALLOWED, "Method not allowed");
   }
 
   const { brief } = req.body as { brief: ContentBrief };
 
   if (!brief?.topic || !brief?.selectedPlatforms?.length) {
-    return res.status(400).json({ error: "topic and selectedPlatforms are required" });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, "topic and selectedPlatforms are required");
   }
 
   try {
-    const result: GenerateContentResponse = await generateContentForBrief(anthropic, brief);
-    return res.status(200).json(result);
+    const brandVoice = await loadActiveBrandVoice();
+    const result: GenerateContentResponse = await generateContentForBrief(
+      anthropic,
+      brief,
+      "claude-opus-4-6",
+      brandVoice
+    );
+    return ok(res, result);
   } catch (err) {
     if (err instanceof SyntaxError) {
-      return res.status(422).json({ error: "Claude returned non-JSON output. Please try again." });
+      return fail(res, 422, API_ERRORS.PARSE_ERROR, "Claude returned non-JSON output. Please try again.");
     }
     const message = err instanceof Error ? err.message : "Generation failed";
-    return res.status(500).json({ error: message });
+    return fail(res, 500, API_ERRORS.INTERNAL_ERROR, message);
   }
 }

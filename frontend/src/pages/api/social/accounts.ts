@@ -1,7 +1,10 @@
 import type { NextApiRequest, NextApiResponse } from "next";
+import type { ApiResponse } from "@/types/api";
+import { ok, fail } from "@/lib/apiResponse";
+import { API_ERRORS } from "@/types/api";
 import prisma from "@/lib/prisma";
 
-interface ConnectedAccount {
+export interface ConnectedAccount {
   id: string;
   platform: string;
   accountHandle: string | null;
@@ -10,18 +13,16 @@ interface ConnectedAccount {
   updatedAt: string;
 }
 
-interface AccountsResponse {
-  success: boolean;
-  accounts?: ConnectedAccount[];
-  error?: string;
+export interface AccountsData {
+  accounts: ConnectedAccount[];
 }
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<AccountsResponse>
+  res: NextApiResponse<ApiResponse<AccountsData>>
 ) {
   if (req.method !== "GET") {
-    return res.status(405).json({ success: false, error: "Method not allowed" });
+    return fail(res, 405, API_ERRORS.METHOD_NOT_ALLOWED, "Method not allowed");
   }
 
   try {
@@ -39,9 +40,9 @@ export default async function handler(
       updatedAt: updatedAt.toISOString(),
     }));
 
-    return res.status(200).json({ success: true, accounts });
+    return ok(res, { accounts });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to fetch accounts";
-    return res.status(500).json({ success: false, error: message });
+    return fail(res, 500, API_ERRORS.INTERNAL_ERROR, message);
   }
 }

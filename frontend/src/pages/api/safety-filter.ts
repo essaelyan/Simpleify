@@ -1,6 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { NextApiRequest, NextApiResponse } from "next";
 import type { Platform, SafetyFilterRequest, SafetyFilterResponse } from "@/types/autoPosting";
+import type { ApiResponse } from "@/types/api";
+import { ok, fail } from "@/lib/apiResponse";
+import { API_ERRORS } from "@/types/api";
 import { PLATFORM_META } from "@/types/autoPosting";
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
@@ -36,16 +39,16 @@ If the content violates any policy set safe=false, flagReason to a concise user-
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse
+  res: NextApiResponse<ApiResponse<SafetyFilterResponse>>
 ) {
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return fail(res, 405, API_ERRORS.METHOD_NOT_ALLOWED, "Method not allowed");
   }
 
   const { draftId, platform, caption, hashtags } = req.body as SafetyFilterRequest;
 
   if (!draftId || !platform || !caption) {
-    return res.status(400).json({ error: "draftId, platform, and caption are required" });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, "draftId, platform, and caption are required");
   }
 
   try {
@@ -64,10 +67,7 @@ export default async function handler(
     try {
       parsed = JSON.parse(rawText);
     } catch {
-      return res.status(422).json({
-        error: "Safety filter returned non-JSON output. Please try again.",
-        raw: rawText,
-      });
+      return fail(res, 422, API_ERRORS.PARSE_ERROR, "Safety filter returned non-JSON output. Please try again.", rawText);
     }
 
     const result: SafetyFilterResponse = {
@@ -77,9 +77,9 @@ export default async function handler(
       severity: parsed.severity ?? null,
     };
 
-    return res.status(200).json(result);
+    return ok(res, result, { agent: "safety-filter", platform });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Safety check failed";
-    return res.status(500).json({ error: message });
+    return fail(res, 500, API_ERRORS.INTERNAL_ERROR, message);
   }
 }

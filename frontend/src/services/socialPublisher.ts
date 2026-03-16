@@ -1,31 +1,30 @@
 /**
- * socialPublisher.ts — Modular social publishing service.
+ * socialPublisher.ts — Platform publishing service.
  *
- * Orchestrates two steps in a single call:
- *   1. AI Safety Filter (Claude Haiku) — blocks unsafe content before it ships
- *   2. Platform publish — real HTTP REST calls when an accessToken is provided,
- *      mock when SOCIAL_PUBLISH_MOCK=true (default) or no token is present.
+ * Responsibility: publish a pre-approved post to a social platform via its
+ * REST API. Safety checking is NOT this service's responsibility.
+ *
+ * Architecture note (cleanup):
+ *   This service previously ran its own Claude Haiku safety check before
+ *   every publish call. That check has been removed. Safety is now the
+ *   exclusive responsibility of the pipeline (pipeline/run.ts → retryUntilSafe)
+ *   and the dedicated safety agent (api/ai/safety-check.ts).
+ *   Callers must ensure content is safety-cleared before calling
+ *   publishToSocialPlatform().
  *
  * Publishing strategy:
  *   - SOCIAL_PUBLISH_MOCK=true  → always return a mock post ID (safe default)
  *   - SOCIAL_PUBLISH_MOCK=false + accessToken → call real platform REST API
  *   - SOCIAL_PUBLISH_MOCK=false + no token    → return { success: false }
  *
- * Server-side only. Import from any API route or server utility.
+ * Server-side only.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
-import type { AdvancedSafetyRequest, Platform } from "@/types/autoPosting";
-import {
-  buildSafetyCheckPrompt,
-  parseSafetyCheckResponse,
-} from "./safetyFilter";
+import type { Platform } from "@/types/autoPosting";
 
 // Controlled by SOCIAL_PUBLISH_MOCK env var.
 // Default: true (mock) unless explicitly set to "false"
 const MOCK_MODE = process.env.SOCIAL_PUBLISH_MOCK !== "false";
-
-const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
 // ─── Public Types ─────────────────────────────────────────────────────────────
 
@@ -40,9 +39,12 @@ export interface PublishInput {
 export interface PublishResult {
   success: boolean;
   platform_post_id?: string;
-  safetyBlocked?: boolean;
-  flagReason?: string;
   isMock?: boolean;
+  // safetyBlocked is no longer set by this service — safety is handled upstream.
+  // The field is kept so route handlers that check it compile without changes;
+  // it will always be undefined when coming from this service.
+  safetyBlocked?: never;
+  flagReason?: never;
 }
 
 // ─── Platform REST implementations ────────────────────────────────────────────
@@ -70,7 +72,7 @@ async function publishToTwitter(
     const err = await res.text();
     throw new Error(`Twitter API error ${res.status}: ${err}`);
   }
-  const data = await res.json() as { data: { id: string } };
+  const data = (await res.json()) as { data: { id: string } };
   return data.data.id;
 }
 
@@ -93,7 +95,7 @@ async function publishToFacebook(
     const err = await res.text();
     throw new Error(`Facebook API error ${res.status}: ${err}`);
   }
-  const data = await res.json() as { id: string };
+  const data = (await res.json()) as { id: string };
   return data.id;
 }
 
@@ -108,6 +110,12 @@ async function publishToLinkedIn(
   accessToken: string
 ): Promise<string> {
   const authorUrn = process.env.LINKEDIN_AUTHOR_URN ?? "";
+  if (!authorUrn) {
+    throw new Error(
+      "LINKEDIN_AUTHOR_URN is not configured. " +
+      "Set it in .env.local (local) or the deployment environment to publish to LinkedIn."
+    );
+  }
   const text = [caption, ...hashtags.map((h) => `#${h}`)].join(" ");
   const body = {
     author: authorUrn,
@@ -133,7 +141,7 @@ async function publishToLinkedIn(
     const err = await res.text();
     throw new Error(`LinkedIn API error ${res.status}: ${err}`);
   }
-  const data = await res.json() as { id: string };
+  const data = (await res.json()) as { id: string };
   return data.id;
 }
 
@@ -152,11 +160,11 @@ async function publishToInstagram(
   accessToken: string
 ): Promise<string> {
   const accountId = process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID;
-  if (!accountId) throw new Error("INSTAGRAM_BUSINESS_ACCOUNT_ID is not configured");
+  if (!accountId)
+    throw new Error("INSTAGRAM_BUSINESS_ACCOUNT_ID is not configured");
 
   const fullCaption = [caption, ...hashtags.map((h) => `#${h}`)].join(" ");
 
-  // Step 1: Create media container
   const containerRes = await fetch(
     `https://graph.facebook.com/v19.0/${accountId}/media`,
     {
@@ -171,31 +179,35 @@ async function publishToInstagram(
   );
   if (!containerRes.ok) {
     const err = await containerRes.text();
-    throw new Error(`Instagram container creation error ${containerRes.status}: ${err}`);
+    throw new Error(
+      `Instagram container creation error ${containerRes.status}: ${err}`
+    );
   }
-  const { id: creationId } = await containerRes.json() as { id: string };
+  const { id: creationId } = (await containerRes.json()) as { id: string };
 
-  // Step 2: Publish the container
   const publishRes = await fetch(
     `https://graph.facebook.com/v19.0/${accountId}/media_publish`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ creation_id: creationId, access_token: accessToken }),
+      body: JSON.stringify({
+        creation_id: creationId,
+        access_token: accessToken,
+      }),
     }
   );
   if (!publishRes.ok) {
     const err = await publishRes.text();
     throw new Error(`Instagram publish error ${publishRes.status}: ${err}`);
   }
-  const { id: postId } = await publishRes.json() as { id: string };
+  const { id: postId } = (await publishRes.json()) as { id: string };
   return postId;
 }
 
 /**
  * TikTok — POST https://open.tiktokapis.com/v2/post/publish/video/init/
  * Requires TikTok Content Posting API access.
- * This posts a video from a public URL (PULL_FROM_URL strategy).
+ * Posts a video from a public URL (PULL_FROM_URL strategy).
  */
 async function publishToTikTok(
   caption: string,
@@ -203,7 +215,9 @@ async function publishToTikTok(
   mediaUrl: string,
   accessToken: string
 ): Promise<string> {
-  const title = [caption, ...hashtags.map((h) => `#${h}`)].join(" ").slice(0, 150);
+  const title = [caption, ...hashtags.map((h) => `#${h}`)]
+    .join(" ")
+    .slice(0, 150);
   const res = await fetch(
     "https://open.tiktokapis.com/v2/post/publish/video/init/",
     {
@@ -232,54 +246,39 @@ async function publishToTikTok(
     const err = await res.text();
     throw new Error(`TikTok API error ${res.status}: ${err}`);
   }
-  const data = await res.json() as { data: { publish_id: string } };
+  const data = (await res.json()) as { data: { publish_id: string } };
   return data.data.publish_id;
 }
 
 // ─── Main Export ──────────────────────────────────────────────────────────────
 
+/**
+ * Publishes a safety-cleared post to a social platform.
+ *
+ * IMPORTANT: This function does NOT run a safety check. The caller is
+ * responsible for ensuring the content has passed the safety agent before
+ * invoking this function. In the pipeline, this is enforced by retryUntilSafe()
+ * in pipeline/run.ts before this is ever called.
+ */
 export async function publishToSocialPlatform(
   input: PublishInput
 ): Promise<PublishResult> {
+  console.log(
+    `[socialPublisher] publish  platform=${input.platform}  mock=${MOCK_MODE}`
+  );
+
   try {
-    // ── Step 1: AI Safety Filter ───────────────────────────────────────────────
-    const safetyReq: AdvancedSafetyRequest = {
-      draftId: Date.now().toString(36) + Math.random().toString(36).slice(2),
-      platform: input.platform,
-      caption: input.caption,
-      hashtags: input.hashtags,
-      brandVoice: null,
-      recentCaptions: [],
-    };
-
-    const safetyResponse = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
-      messages: [{ role: "user", content: buildSafetyCheckPrompt(safetyReq) }],
-    });
-
-    const rawText = safetyResponse.content
-      .filter((b) => b.type === "text")
-      .map((b) => (b as { type: "text"; text: string }).text)
-      .join("");
-
-    const { safe, flagReason } = parseSafetyCheckResponse(rawText);
-
-    if (!safe) {
-      return { success: false, safetyBlocked: true, flagReason: flagReason ?? undefined };
-    }
-
-    // ── Step 2: Publish ────────────────────────────────────────────────────────
     if (MOCK_MODE) {
-      return {
-        success: true,
-        platform_post_id: `mock_${input.platform}_${Date.now()}`,
-        isMock: true,
-      };
+      const id = `mock_${input.platform}_${Date.now()}`;
+      console.log(`[socialPublisher] mock publish → ${id}`);
+      return { success: true, platform_post_id: id, isMock: true };
     }
 
     const token = input.accessToken;
     if (!token) {
+      console.warn(
+        `[socialPublisher] no accessToken for platform=${input.platform} — skipping real publish`
+      );
       return { success: false };
     }
 
@@ -287,17 +286,26 @@ export async function publishToSocialPlatform(
 
     switch (input.platform) {
       case "twitter":
-        platformPostId = await publishToTwitter(input.caption, input.hashtags, token);
+        platformPostId = await publishToTwitter(
+          input.caption,
+          input.hashtags,
+          token
+        );
         break;
-
       case "facebook":
-        platformPostId = await publishToFacebook(input.caption, input.hashtags, token);
+        platformPostId = await publishToFacebook(
+          input.caption,
+          input.hashtags,
+          token
+        );
         break;
-
       case "linkedin":
-        platformPostId = await publishToLinkedIn(input.caption, input.hashtags, token);
+        platformPostId = await publishToLinkedIn(
+          input.caption,
+          input.hashtags,
+          token
+        );
         break;
-
       case "instagram":
         platformPostId = await publishToInstagram(
           input.caption,
@@ -306,7 +314,6 @@ export async function publishToSocialPlatform(
           token
         );
         break;
-
       case "tiktok":
         platformPostId = await publishToTikTok(
           input.caption,
@@ -315,14 +322,16 @@ export async function publishToSocialPlatform(
           token
         );
         break;
-
       default:
         return { success: false };
     }
 
+    console.log(
+      `[socialPublisher] published  platform=${input.platform}  postId=${platformPostId}`
+    );
     return { success: true, platform_post_id: platformPostId, isMock: false };
   } catch (err) {
-    console.error("[socialPublisher] error:", err);
+    console.error(`[socialPublisher] error platform=${input.platform}:`, err);
     return { success: false };
   }
 }

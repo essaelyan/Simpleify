@@ -6,27 +6,30 @@
  * ContentBrief.optimizationHints so future captions are automatically improved
  * by real performance data (hooks, formats, posting times).
  *
- * Returns { success: true } with no hints field when no snapshot exists yet.
+ * Returns data: { hints: null } when no snapshot exists yet.
+ *
+ * Response: ApiResponse<FeedbackLatestData>
+ *   meta: { isMock } — true when the snapshot was built from mock GA/IG data
  */
 
 import type { NextApiRequest, NextApiResponse } from "next";
 import type { ContentOptimizationHints } from "@/types/feedbackLoop";
+import type { ApiResponse } from "@/types/api";
+import { ok, fail } from "@/lib/apiResponse";
+import { API_ERRORS } from "@/types/api";
 import prisma from "@/lib/prisma";
 
-interface LatestFeedbackResponse {
-  success: boolean;
-  hints?: ContentOptimizationHints;
-  isMock?: boolean; // true when the snapshot was built from mock GA/IG data
-  generatedAt?: string;
-  error?: string;
+export interface FeedbackLatestData {
+  hints: ContentOptimizationHints | null;
+  generatedAt: string | null;
 }
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<LatestFeedbackResponse>
+  res: NextApiResponse<ApiResponse<FeedbackLatestData>>
 ) {
   if (req.method !== "GET") {
-    return res.status(405).json({ success: false, error: "Method not allowed" });
+    return fail(res, 405, API_ERRORS.METHOD_NOT_ALLOWED, "Method not allowed");
   }
 
   try {
@@ -35,19 +38,19 @@ export default async function handler(
     });
 
     if (!snapshot) {
-      return res.status(200).json({ success: true });
+      return ok(res, { hints: null, generatedAt: null });
     }
 
     const hints: ContentOptimizationHints = JSON.parse(snapshot.hints);
+    const isMock = snapshot.gaIsMock && snapshot.igIsMock;
 
-    return res.status(200).json({
-      success: true,
-      hints,
-      isMock: snapshot.gaIsMock && snapshot.igIsMock,
-      generatedAt: snapshot.createdAt.toISOString(),
-    });
+    return ok(
+      res,
+      { hints, generatedAt: snapshot.createdAt.toISOString() },
+      { isMock }
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to fetch feedback";
-    return res.status(500).json({ success: false, error: message });
+    return fail(res, 500, API_ERRORS.INTERNAL_ERROR, message);
   }
 }

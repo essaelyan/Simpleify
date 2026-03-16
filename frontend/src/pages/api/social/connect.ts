@@ -1,5 +1,8 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import type { Platform } from "@/types/autoPosting";
+import type { ApiResponse } from "@/types/api";
+import { ok, fail } from "@/lib/apiResponse";
+import { API_ERRORS } from "@/types/api";
 import { PLATFORMS } from "@/types/autoPosting";
 import prisma from "@/lib/prisma";
 
@@ -11,18 +14,16 @@ interface ConnectRequest {
   accountHandle?: string;
 }
 
-interface ConnectResponse {
-  success: boolean;
-  accountId?: string;
-  error?: string;
+export interface ConnectData {
+  accountId: string;
 }
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<ConnectResponse>
+  res: NextApiResponse<ApiResponse<ConnectData>>
 ) {
   if (req.method !== "POST") {
-    return res.status(405).json({ success: false, error: "Method not allowed" });
+    return fail(res, 405, API_ERRORS.METHOD_NOT_ALLOWED, "Method not allowed");
   }
 
   const { platform, accessToken, refreshToken, expiresAt, accountHandle } =
@@ -30,13 +31,10 @@ export default async function handler(
 
   // ── Validate input ───────────────────────────────────────────────────────────
   if (!platform || !PLATFORMS.includes(platform)) {
-    return res.status(400).json({
-      success: false,
-      error: `platform must be one of: ${PLATFORMS.join(", ")}`,
-    });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, `platform must be one of: ${PLATFORMS.join(", ")}`);
   }
   if (!accessToken?.trim()) {
-    return res.status(400).json({ success: false, error: "accessToken is required" });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, "accessToken is required");
   }
 
   try {
@@ -53,9 +51,9 @@ export default async function handler(
       update: data,
     });
 
-    return res.status(200).json({ success: true, accountId: record.id });
+    return ok(res, { accountId: record.id }, { platform });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to connect account";
-    return res.status(500).json({ success: false, error: message });
+    return fail(res, 500, API_ERRORS.INTERNAL_ERROR, message);
   }
 }
