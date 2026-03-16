@@ -22,6 +22,10 @@ import prisma from "@/lib/prisma";
 function mapDbStatus(dbStatus: string): string {
   // The pipeline stores "safety_blocked"; the UI calls it "blocked"
   if (dbStatus === "safety_blocked") return "blocked";
+  // "processing" is an internal interim status used by the scheduler to
+  // atomically claim a post before publishing.  Show it as "scheduled" so
+  // the UI doesn't flicker to an unknown state during the brief window.
+  if (dbStatus === "processing") return "scheduled";
   // published, failed, qa_rejected, no_account, scheduled are identical in both namespaces
   return dbStatus;
 }
