@@ -8,7 +8,7 @@
  * │                                                                         │
  * │  Step 0   Load BrandVoiceProfile from DB                               │
  * │  Step 1   Load latest FeedbackSnapshot → inject as optimizationHints  │
- * │  Step 1b  Brief Enrichment Agent (Agent C, Opus)                       │
+ * │  Step 1b  Brief Enrichment Agent (Agent C, Haiku)                      │
  * │  Step 2   Content Generation Agent (Opus) — brand voice + enrichment  │
  * │             + feedback hints + QA revision guidance                    │
  * │  Step 3   Load connected social accounts from DB                       │
@@ -21,17 +21,17 @@
  * │             4c  Verify connected account (skip if absent)              │
  * │             4d  Social Publishing Agent                                 │
  * │             4e  Persist SocialPost record                               │
- * │  Step 5   Fetch GA4 + Instagram analytics (direct service calls)       │
- * │  Step 6   Feedback Optimization Agent (Opus)                           │
- * │  Step 7   Persist FeedbackSnapshot                                     │
+ * │                                                                         │
+ * │  Steps 5–7 (analytics fetch, feedback optimization, snapshot persist)  │
+ * │  run asynchronously via POST /api/feedback/process-run, triggered by   │
+ * │  the UI after this response is received.                                │
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * Failure contract:
  *   - One platform error never breaks the full run (processPlatform catches all).
- *   - Steps 5–7 (feedback loop) are non-critical — failure is swallowed.
  *   - Agent failures (enrichment, QA) degrade gracefully with inline fallbacks.
  *
- * Input:  { brief: ContentBrief, mediaUrl: string, dateRangeDays?: number }
+ * Input:  { brief: ContentBrief, mediaUrl: string }
  * Output: PipelineRunResponse (full contract defined below)
  */
 
@@ -57,11 +57,6 @@ import {
   parseSafetyCheckResponse,
   buildRegenerationHints,
 } from "@/services/safetyFilter";
-import {
-  buildOptimizationPrompt,
-  parseOptimizationResponse,
-} from "@/services/feedbackLoop";
-import { fetchGAData, fetchInstagramData } from "@/services/analyticsDataService";
 import { loadActiveBrandVoice, brandVoiceToPromptText } from "@/services/brandVoiceService";
 import { enrichBrief } from "@/services/briefEnrichmentAgent";
 import { runContentQA } from "@/services/contentQAAgent";
@@ -154,8 +149,6 @@ interface PipelineRunRequest {
   brief: ContentBrief;
   /** Media URL attached to this post. Defaults to "" when no media is provided. */
   mediaUrl?: string;
-  /** Feedback loop lookback window in days. Defaults to 30. */
-  dateRangeDays?: number;
 }
 
 /** Shape of the `data` field in ApiResponse<PipelineRunData>. */
@@ -177,13 +170,23 @@ export interface PipelineRunData {
   };
   /** Per-platform results — one entry per platform in brief.selectedPlatforms. */
   platforms: PlatformPipelineResult[];
-  /** Freshly generated optimization hints (null if feedback loop failed). */
+  /**
+   * Always null — feedback runs asynchronously via POST /api/feedback/process-run.
+   * The UI triggers that route after receiving this response and updates the
+   * optimization store once hints arrive.
+   */
   feedbackHints: ContentOptimizationHints | null;
-  /** Analytics data source metadata used for this feedback run. */
+  /** Always null — feedback data sources are returned by /api/feedback/process-run. */
   feedbackDataSources: {
     ga: { isMock: boolean; sessions: number };
     instagram: { isMock: boolean; posts: number; avgEngagement: number };
   } | null;
+  /**
+   * true when the pipeline has handed off feedback processing to
+   * POST /api/feedback/process-run. The UI should trigger that route and
+   * show a "Feedback analysis pending" indicator until it completes.
+   */
+  feedbackScheduled: boolean;
 }
 
 /** Full API envelope type for consumers that need to type the response. */
@@ -690,11 +693,7 @@ export default async function handler(
   }
 
   const startedAt = new Date().toISOString();
-  const { brief, mediaUrl = "", dateRangeDays = 30 } = req.body as PipelineRunRequest;
-  // SKIP_FEEDBACK_LOOP=true omits Steps 5–7 (analytics fetch + Opus optimization +
-  // snapshot persist). Recommended for preview/staging to stay within 60 s budget.
-  const skipFeedbackLoop = process.env.SKIP_FEEDBACK_LOOP === "true";
-  if (skipFeedbackLoop) log("SKIP_FEEDBACK_LOOP=true — feedback steps 5–7 will be omitted");
+  const { brief, mediaUrl = "" } = req.body as PipelineRunRequest;
 
   if (!brief?.topic || !brief?.selectedPlatforms?.length) {
     fail(res, 400, API_ERRORS.BAD_REQUEST, "brief.topic and brief.selectedPlatforms are required");
@@ -820,75 +819,20 @@ export default async function handler(
     );
     log(`[pipeline] stage=platform_processing durationMs=${tPlatforms()}`);
 
-    let feedbackHints: ContentOptimizationHints | null = null;
-    let feedbackDataSources: PipelineRunData["feedbackDataSources"] = null;
+    // ── Steps 5–7: Feedback pipeline (async, off critical path) ──────────────
+    // Analytics fetch, feedback optimization, and FeedbackSnapshot persist run
+    // via POST /api/feedback/process-run — triggered by the UI after this
+    // response is received. This keeps the pipeline well within the 60 s budget.
+    log("[pipeline] feedbackScheduled=true — Steps 5–7 handed off to /api/feedback/process-run");
 
-    if (skipFeedbackLoop) {
-      log("── Steps 5–7: Feedback loop SKIPPED (SKIP_FEEDBACK_LOOP=true) ───────");
-    } else {
-      // ── Step 5: Analytics data fetch ────────────────────────────────────────
-      // Owned by: analyticsDataService.ts
-      // Direct service calls — no internal HTTP round-trips.
-      // Falls back to mock data when env vars are not configured.
-      log("── Step 5: Fetching analytics data ──────────────────────────────────");
-      const tFeedback = stageTimer();
-      try {
-        const [gaData, igData] = await Promise.all([
-          fetchGAData(dateRangeDays),
-          fetchInstagramData(dateRangeDays),
-        ]);
-        log(`GA4:       isMock=${gaData.isMock}  sessions=${gaData.totalSessions}`);
-        log(`Instagram: isMock=${igData.isMock}  posts=${igData.totalPosts}  avgEngagement=${igData.avgEngagementRate.toFixed(2)}%`);
-
-        feedbackDataSources = {
-          ga: { isMock: gaData.isMock, sessions: gaData.totalSessions },
-          instagram: { isMock: igData.isMock, posts: igData.totalPosts, avgEngagement: igData.avgEngagementRate },
-        };
-
-        // ── Step 6: Feedback Optimization Agent ────────────────────────────
-        // Owned by: feedbackLoop.ts (Opus)
-        // Synthesizes GA + Instagram data into actionable ContentOptimizationHints.
-        log("── Step 6: Feedback Optimization Agent ──────────────────────────────");
-        const optimizationPrompt = buildOptimizationPrompt(gaData, igData);
-        const optimizationResponse = await anthropic.messages.create({
-          model: "claude-opus-4-6",
-          max_tokens: 2048,
-          messages: [{ role: "user", content: optimizationPrompt }],
-        });
-        const rawText = optimizationResponse.content
-          .filter((b) => b.type === "text")
-          .map((b) => (b as { type: "text"; text: string }).text)
-          .join("");
-        feedbackHints = parseOptimizationResponse(rawText, gaData, igData);
-
-        // ── Step 7: Persist FeedbackSnapshot ──────────────────────────────
-        // Saved so the next pipeline run auto-loads it in Step 1.
-        log("── Step 7: Persisting FeedbackSnapshot ──────────────────────────────");
-        await prisma.feedbackSnapshot.create({
-          data: {
-            hints: JSON.stringify(feedbackHints),
-            gaIsMock: gaData.isMock,
-            igIsMock: igData.isMock,
-          },
-        });
-        log("feedback snapshot saved");
-        log(`[pipeline] stage=feedback durationMs=${tFeedback()}`);
-      } catch (err) {
-        // Feedback loop is non-critical — pipeline result is still returned.
-        log(`[pipeline] stage=feedback durationMs=${tFeedback()} FAILED: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+    const feedbackHints: ContentOptimizationHints | null = null;
+    const feedbackDataSources: PipelineRunData["feedbackDataSources"] = null;
 
     const completedAt = new Date().toISOString();
     log(`── Pipeline complete  briefId=${briefId}  duration=${Date.now() - new Date(startedAt).getTime()}ms ──`);
     for (const p of platforms) {
       log(`  ${p.platform}: ${p.status}  qa=${p.qa?.verdict ?? "skipped"}(${p.qa?.overallScore ?? "-"})  safety=${p.safety?.passed ?? "-"}(${p.safety?.attempts ?? "-"}x)  published=${p.status === "published"}`);
     }
-
-    const isMock =
-      feedbackDataSources !== null &&
-      feedbackDataSources.ga.isMock &&
-      feedbackDataSources.instagram.isMock;
 
     ok(
       res,
@@ -901,8 +845,8 @@ export default async function handler(
         platforms,
         feedbackHints,
         feedbackDataSources,
+        feedbackScheduled: true,
       },
-      { isMock }
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : "Pipeline failed";

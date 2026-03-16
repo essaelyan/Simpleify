@@ -1,6 +1,6 @@
 // /api/pipeline/run is now the single source of truth for the Auto Posting workflow.
 // The UI is a pure presentation layer over the PipelineRunData it returns.
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useState } from "react";
 import type {
   AutoPostingAction,
   AutoPostingState,
@@ -12,7 +12,7 @@ import type {
   PostStatus,
 } from "@/types/autoPosting";
 import { runPipeline, fetchPostHistory } from "@/api/autoPosting";
-import { fetchLatestHints } from "@/api/feedbackLoop";
+import { fetchLatestHints, processFeedbackRun } from "@/api/feedbackLoop";
 import { useOptimizationStore } from "@/store/optimizationStore";
 import BriefForm from "@/components/autoPosting/BriefForm";
 import PipelineStatusCard from "@/components/autoPosting/PipelineStatusCard";
@@ -286,6 +286,7 @@ const TERMINAL_STATES: PostStatus[] = ["published", "blocked", "qa_rejected", "n
 
 export default function AutoPostingPage() {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const [feedbackPending, setFeedbackPending] = useState(false);
   const setHints = useOptimizationStore((s) => s.setHints);
   const lastFetchedAt = useOptimizationStore((s) => s.lastFetchedAt);
 
@@ -397,9 +398,21 @@ export default function AutoPostingPage() {
 
       dispatch({ type: "PIPELINE_RESULT_RECEIVED", payload: completedPayload });
 
-      // If the pipeline returned fresh feedback hints, update the optimization store
-      if (result.feedbackHints) {
-        setHints(result.feedbackHints);
+      // ── Async feedback trigger ────────────────────────────────────────────
+      // The pipeline no longer runs Steps 5–7. Trigger them now as a separate
+      // non-blocking call. The UI shows "Feedback analysis running…" until done.
+      if (result.feedbackScheduled) {
+        setFeedbackPending(true);
+        processFeedbackRun(30)
+          .then((feedbackResult) => {
+            setHints(feedbackResult.hints);
+          })
+          .catch(() => {
+            // Non-critical — existing hints in the store are preserved
+          })
+          .finally(() => {
+            setFeedbackPending(false);
+          });
       }
     } catch (err) {
       // Catastrophic failure (network error, 500, etc.) — mark all platforms failed
@@ -538,7 +551,7 @@ export default function AutoPostingPage() {
                   <div className="mb-5 bg-gray-900 border border-gray-800/70 rounded-xl px-5 py-4 flex items-center justify-between gap-4">
                     <div>
                       <p className="text-sm font-semibold text-gray-200 mb-1">Pipeline complete</p>
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-3 flex-wrap">
                         {publishedCount > 0 && (
                           <span className="flex items-center gap-1.5 text-xs text-emerald-400">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
@@ -567,6 +580,12 @@ export default function AutoPostingPage() {
                           <span className="flex items-center gap-1.5 text-xs text-red-400">
                             <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
                             {failedCount} failed
+                          </span>
+                        )}
+                        {feedbackPending && (
+                          <span className="flex items-center gap-1.5 text-xs text-indigo-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+                            Feedback analysis running…
                           </span>
                         )}
                       </div>
