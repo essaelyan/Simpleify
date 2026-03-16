@@ -26,7 +26,7 @@ Vercel project settings).
 ## Build command
 
 ```
-npx prisma generate && npx prisma db push --skip-generate && next build
+npx prisma generate && npx prisma db push && next build
 ```
 
 This is already set in [vercel.json](../vercel.json).
@@ -34,7 +34,7 @@ This is already set in [vercel.json](../vercel.json).
 | Step | What it does |
 |---|---|
 | `prisma generate` | Compiles the Prisma client from the schema |
-| `prisma db push --skip-generate` | Applies schema changes to the PostgreSQL database |
+| `prisma db push` | Applies schema changes to the PostgreSQL database |
 | `next build` | Produces the production Next.js build |
 
 Schema changes are applied automatically on every deploy. No separate migration
