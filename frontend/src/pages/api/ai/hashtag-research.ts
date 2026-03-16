@@ -17,26 +17,16 @@
  *     excludeHashtags?: string[];     // hashtags to avoid (banned, overused, etc.)
  *   }
  *
- * Response:
- *   {
- *     platformHashtags: Array<{
- *       platform: Platform;
- *       recommended: Array<{
- *         tag: string;
- *         volumeTier: "niche" | "medium" | "broad";
- *         relevanceReason: string;
- *       }>;
- *       strategy: string;             // 1-sentence mix rationale
- *       avoidList: string[];          // platform-specific tags that hurt reach
- *     }>;
- *     crossPlatformCore: string[];    // hashtags worth using on every platform
- *     strategyNotes: string;
- *   }
+ * Response: ApiResponse<HashtagResearchData>
+ *   meta: { agent: "hashtag-research" }
  */
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { NextApiRequest, NextApiResponse } from "next";
 import type { Platform } from "@/types/autoPosting";
+import type { ApiResponse } from "@/types/api";
+import { ok, fail } from "@/lib/apiResponse";
+import { API_ERRORS } from "@/types/api";
 import { PLATFORMS, PLATFORM_META } from "@/types/autoPosting";
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
@@ -49,49 +39,38 @@ interface HashtagResearchRequest {
   excludeHashtags?: string[];
 }
 
-interface HashtagEntry {
+export interface HashtagEntry {
   tag: string;
   volumeTier: "niche" | "medium" | "broad";
   relevanceReason: string;
 }
 
-interface PlatformHashtags {
+export interface PlatformHashtags {
   platform: Platform;
   recommended: HashtagEntry[];
   strategy: string;
   avoidList: string[];
 }
 
-interface HashtagResearchResponse {
+export interface HashtagResearchData {
   platformHashtags: PlatformHashtags[];
   crossPlatformCore: string[];
   strategyNotes: string;
-  error?: string;
 }
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<HashtagResearchResponse>
+  res: NextApiResponse<ApiResponse<HashtagResearchData>>
 ) {
   if (req.method !== "POST") {
-    return res.status(405).json({
-      platformHashtags: [],
-      crossPlatformCore: [],
-      strategyNotes: "",
-      error: "Method not allowed",
-    });
+    return fail(res, 405, API_ERRORS.METHOD_NOT_ALLOWED, "Method not allowed");
   }
 
   const { topic, niche, targetAudience, targetPlatforms, excludeHashtags } =
     req.body as HashtagResearchRequest;
 
   if (!topic?.trim() || !niche?.trim() || !targetAudience?.trim()) {
-    return res.status(400).json({
-      platformHashtags: [],
-      crossPlatformCore: [],
-      strategyNotes: "",
-      error: "topic, niche, and targetAudience are required",
-    });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, "topic, niche, and targetAudience are required");
   }
 
   const platforms = targetPlatforms?.length ? targetPlatforms : PLATFORMS;
@@ -174,20 +153,15 @@ avoidList should include any tags that are banned, shadowbanned-risk, or genuine
       .replace(/\s*```\s*$/, "")
       .trim();
 
-    const parsed = JSON.parse(cleaned) as HashtagResearchResponse;
+    const parsed = JSON.parse(cleaned) as HashtagResearchData;
 
     if (!Array.isArray(parsed.platformHashtags) || parsed.platformHashtags.length === 0) {
       throw new Error("No platform hashtags returned");
     }
 
-    return res.status(200).json(parsed);
+    return ok(res, parsed, { agent: "hashtag-research" });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Hashtag research failed";
-    return res.status(500).json({
-      platformHashtags: [],
-      crossPlatformCore: [],
-      strategyNotes: "",
-      error: message,
-    });
+    return fail(res, 500, API_ERRORS.INTERNAL_ERROR, message);
   }
 }

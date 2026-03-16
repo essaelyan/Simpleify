@@ -4,6 +4,9 @@ import type {
   AdvancedSafetyRequest,
   AdvancedSafetyResponse,
 } from "@/types/autoPosting";
+import type { ApiResponse } from "@/types/api";
+import { ok, fail } from "@/lib/apiResponse";
+import { API_ERRORS } from "@/types/api";
 import {
   buildSafetyCheckPrompt,
   parseSafetyCheckResponse,
@@ -14,10 +17,10 @@ const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse
+  res: NextApiResponse<ApiResponse<AdvancedSafetyResponse>>
 ) {
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return fail(res, 405, API_ERRORS.METHOD_NOT_ALLOWED, "Method not allowed");
   }
 
   const {
@@ -30,9 +33,7 @@ export default async function handler(
   } = req.body as AdvancedSafetyRequest;
 
   if (!draftId || !platform || !caption) {
-    return res
-      .status(400)
-      .json({ error: "draftId, platform, and caption are required" });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, "draftId, platform, and caption are required");
   }
 
   const safetyReq: AdvancedSafetyRequest = {
@@ -47,7 +48,7 @@ export default async function handler(
   try {
     const response = await anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 512,
+      max_tokens: 1024,
       messages: [
         { role: "user", content: buildSafetyCheckPrompt(safetyReq) },
       ],
@@ -62,10 +63,7 @@ export default async function handler(
     try {
       parsed = parseSafetyCheckResponse(rawText);
     } catch {
-      return res.status(422).json({
-        error: "Safety check returned non-JSON or invalid output. Please try again.",
-        raw: rawText,
-      });
+      return fail(res, 422, API_ERRORS.PARSE_ERROR, "Safety check returned non-JSON or invalid output. Please try again.", rawText);
     }
 
     const failedChecks = parsed.checks.filter((c) => !c.passed);
@@ -80,9 +78,9 @@ export default async function handler(
       regenerationHints,
     };
 
-    return res.status(200).json(result);
+    return ok(res, result, { agent: "safety-check", platform });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Safety check failed";
-    return res.status(500).json({ error: message });
+    return fail(res, 500, API_ERRORS.INTERNAL_ERROR, message);
   }
 }

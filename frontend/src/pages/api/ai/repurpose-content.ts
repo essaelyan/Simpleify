@@ -18,23 +18,16 @@
  *     targetPlatforms?: Platform[]; // defaults to all 5
  *   }
  *
- * Response:
- *   {
- *     posts: Array<{
- *       platform: Platform;
- *       caption: string;
- *       hashtags: string[];
- *       contentAngle: string;    // how the long-form was distilled for this platform
- *       keyTakeaway: string;     // the single insight extracted
- *     }>;
- *     extractedHooks: string[];  // top 3 hook-worthy lines from source content
- *     repurposingNotes: string;  // brief strategy notes
- *   }
+ * Response: ApiResponse<RepurposeContentData>
+ *   meta: { agent: "repurpose-content" }
  */
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { NextApiRequest, NextApiResponse } from "next";
 import type { Platform } from "@/types/autoPosting";
+import type { ApiResponse } from "@/types/api";
+import { ok, fail } from "@/lib/apiResponse";
+import { API_ERRORS } from "@/types/api";
 import { PLATFORMS, PLATFORM_META } from "@/types/autoPosting";
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
@@ -50,7 +43,7 @@ interface RepurposeContentRequest {
   targetPlatforms?: Platform[];
 }
 
-interface RepurposedPost {
+export interface RepurposedPost {
   platform: Platform;
   caption: string;
   hashtags: string[];
@@ -58,11 +51,10 @@ interface RepurposedPost {
   keyTakeaway: string;
 }
 
-interface RepurposeContentResponse {
+export interface RepurposeContentData {
   posts: RepurposedPost[];
   extractedHooks: string[];
   repurposingNotes: string;
-  error?: string;
 }
 
 const SOURCE_TYPE_LABELS: Record<SourceType, string> = {
@@ -75,15 +67,10 @@ const SOURCE_TYPE_LABELS: Record<SourceType, string> = {
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<RepurposeContentResponse>
+  res: NextApiResponse<ApiResponse<RepurposeContentData>>
 ) {
   if (req.method !== "POST") {
-    return res.status(405).json({
-      posts: [],
-      extractedHooks: [],
-      repurposingNotes: "",
-      error: "Method not allowed",
-    });
+    return fail(res, 405, API_ERRORS.METHOD_NOT_ALLOWED, "Method not allowed");
   }
 
   const {
@@ -96,20 +83,10 @@ export default async function handler(
   } = req.body as RepurposeContentRequest;
 
   if (!sourceContent?.trim()) {
-    return res.status(400).json({
-      posts: [],
-      extractedHooks: [],
-      repurposingNotes: "",
-      error: "sourceContent is required",
-    });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, "sourceContent is required");
   }
   if (!targetAudience?.trim() || !callToAction?.trim()) {
-    return res.status(400).json({
-      posts: [],
-      extractedHooks: [],
-      repurposingNotes: "",
-      error: "targetAudience and callToAction are required",
-    });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, "targetAudience and callToAction are required");
   }
 
   const platforms = targetPlatforms?.length ? targetPlatforms : PLATFORMS;
@@ -196,20 +173,15 @@ Include one post entry per platform: ${platforms.join(", ")}.`;
       .replace(/\s*```\s*$/, "")
       .trim();
 
-    const parsed = JSON.parse(cleaned) as RepurposeContentResponse;
+    const parsed = JSON.parse(cleaned) as RepurposeContentData;
 
     if (!Array.isArray(parsed.posts) || parsed.posts.length === 0) {
       throw new Error("No posts returned");
     }
 
-    return res.status(200).json(parsed);
+    return ok(res, parsed, { agent: "repurpose-content" });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Repurposing failed";
-    return res.status(500).json({
-      posts: [],
-      extractedHooks: [],
-      repurposingNotes: "",
-      error: message,
-    });
+    return fail(res, 500, API_ERRORS.INTERNAL_ERROR, message);
   }
 }

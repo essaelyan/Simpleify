@@ -16,21 +16,15 @@
  *     }
  *   }
  *
- * Response:
- *   {
- *     strategy: {
- *       contentStrategy: { headline: string; tactics: string[] };
- *       paidStrategy: { headline: string; tactics: string[] };
- *       audienceExpansion: { headline: string; tactics: string[] };
- *       experiments: Array<{ name: string; hypothesis: string; successMetric: string }>;
- *       priorityOrder: string[];
- *       executiveSummary: string;
- *     }
- *   }
+ * Response: ApiResponse<GrowthStrategyData>
+ *   meta: { agent: "growth-strategy" }
  */
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { NextApiRequest, NextApiResponse } from "next";
+import type { ApiResponse } from "@/types/api";
+import { ok, fail } from "@/lib/apiResponse";
+import { API_ERRORS } from "@/types/api";
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
@@ -45,45 +39,38 @@ interface GrowthStrategyRequest {
   };
 }
 
-interface GrowthStrategyTactic {
+export interface GrowthStrategyTactic {
   headline: string;
   tactics: string[];
 }
 
-interface GrowthExperiment {
+export interface GrowthExperiment {
   name: string;
   hypothesis: string;
   successMetric: string;
 }
 
-interface GrowthStrategyResponse {
-  strategy: {
-    contentStrategy: GrowthStrategyTactic;
-    paidStrategy: GrowthStrategyTactic;
-    audienceExpansion: GrowthStrategyTactic;
-    experiments: GrowthExperiment[];
-    priorityOrder: string[];
-    executiveSummary: string;
-  };
-  error?: string;
+export interface GrowthStrategyData {
+  contentStrategy: GrowthStrategyTactic;
+  paidStrategy: GrowthStrategyTactic;
+  audienceExpansion: GrowthStrategyTactic;
+  experiments: GrowthExperiment[];
+  priorityOrder: string[];
+  executiveSummary: string;
 }
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<GrowthStrategyResponse>
+  res: NextApiResponse<ApiResponse<GrowthStrategyData>>
 ) {
   if (req.method !== "POST") {
-    return res
-      .status(405)
-      .json({ strategy: null as never, error: "Method not allowed" });
+    return fail(res, 405, API_ERRORS.METHOD_NOT_ALLOWED, "Method not allowed");
   }
 
   const { insights } = req.body as GrowthStrategyRequest;
 
   if (!insights || typeof insights !== "object") {
-    return res
-      .status(400)
-      .json({ strategy: null as never, error: "insights object is required" });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, "insights object is required");
   }
 
   const prompt = `You are a growth marketing strategist. Using the following business insights, build a practical growth strategy.
@@ -160,10 +147,10 @@ Rules:
       .replace(/\s*```\s*$/, "")
       .trim();
 
-    const strategy = JSON.parse(cleaned);
-    return res.status(200).json({ strategy });
+    const strategy = JSON.parse(cleaned) as GrowthStrategyData;
+    return ok(res, strategy, { agent: "growth-strategy" });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Strategy generation failed";
-    return res.status(500).json({ strategy: null as never, error: message });
+    return fail(res, 500, API_ERRORS.INTERNAL_ERROR, message);
   }
 }

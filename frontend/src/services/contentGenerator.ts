@@ -10,6 +10,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { ContentBrief, GeneratedPlatformContent } from "@/types/autoPosting";
 import { PLATFORM_META } from "@/types/autoPosting";
+import type { BrandVoiceProfile } from "@/types/brandVoice";
+import { brandVoiceToPromptText } from "@/services/brandVoiceService";
 
 // ─── Public Types ─────────────────────────────────────────────────────────────
 
@@ -20,7 +22,10 @@ export interface GenerateResult {
 
 // ─── Prompt Builder ───────────────────────────────────────────────────────────
 
-export function buildContentPrompt(brief: ContentBrief): string {
+export function buildContentPrompt(
+  brief: ContentBrief,
+  brandVoice: BrandVoiceProfile | null = null
+): string {
   // Per-platform style guide: hashtag range + writing style expectations
   const PLATFORM_SPECS: Record<
     string,
@@ -71,13 +76,17 @@ export function buildContentPrompt(brief: ContentBrief): string {
     })
     .join("\n");
 
+  const brandVoiceBlock = brandVoice
+    ? `\n\nBRAND VOICE (strict — all captions must match this profile):\n${brandVoiceToPromptText(brandVoice)}`
+    : "";
+
   let prompt = `You are a social media copywriter. Your job is to write platform-specific post content.
 
 BRIEF:
 Topic: ${brief.topic}
 Tone: ${brief.tone}
 Target Audience: ${brief.targetAudience}
-Call to Action: ${brief.callToAction}
+Call to Action: ${brief.callToAction}${brandVoiceBlock}
 
 PLATFORM REQUIREMENTS:
 ${platformDetails}
@@ -112,6 +121,37 @@ Respond ONLY with valid JSON in this exact format, no explanation, no markdown f
 
 Include one entry per platform: ${brief.selectedPlatforms.join(", ")}.`;
 
+  // ── Brief Enrichment (Agent C output) — injected when available ───────────
+  // Provides strategically-grounded angles, hooks, and audience framing
+  // produced by the enrichment agent before this generation step.
+  if (brief.enrichment) {
+    const e = brief.enrichment;
+    prompt += `\n\nBRIEF ENRICHMENT (strategic context — use to elevate content quality):
+Enriched topic framing: ${e.enrichedTopic}
+Refined audience: ${e.refinedAudience}
+
+Content angles to choose from (pick the most relevant per platform):
+${e.contentAngles.map((a, i) => `${i + 1}. ${a.angle} — ${a.rationale}`).join("\n")}
+
+Suggested opening hooks (adapt to platform — do not copy verbatim):
+${e.suggestedHooks.map((h, i) => `${i + 1}. "${h.hook}"${h.platform ? ` (best for ${h.platform})` : ""}`).join("\n")}
+
+CTA options (choose the best fit per platform):
+${e.ctaOptions.map((c, i) => `${i + 1}. "${c.cta}" — ${c.context}`).join("\n")}
+
+Tone refinements: ${e.toneRefinements.join("; ")}${
+      e.riskFlags.length > 0
+        ? `\nRisk flags to avoid: ${e.riskFlags.join("; ")}`
+        : ""
+    }
+
+Rules: Use the enriched framing and hooks as inspiration — adapt them, do not copy. Each platform caption must still feel native to that platform.`;
+  }
+
+  if (brief.qaRevisionGuidance) {
+    prompt += `\n\nQUALITY REVISION GUIDANCE (apply to the rewritten caption for this platform):\n${brief.qaRevisionGuidance}`;
+  }
+
   if (brief.safetyFeedback) {
     prompt += `\n\nSAFETY FEEDBACK (apply to ALL captions):\n${brief.safetyFeedback}`;
   }
@@ -143,12 +183,13 @@ RULES: Open each caption using a hook pattern that fits the topic. Do not mentio
 export async function generateContentForBrief(
   anthropic: Anthropic,
   brief: ContentBrief,
-  model = "claude-opus-4-6"
+  model = "claude-opus-4-6",
+  brandVoice: BrandVoiceProfile | null = null
 ): Promise<GenerateResult> {
   const response = await anthropic.messages.create({
     model,
     max_tokens: 2048,
-    messages: [{ role: "user", content: buildContentPrompt(brief) }],
+    messages: [{ role: "user", content: buildContentPrompt(brief, brandVoice) }],
   });
 
   const rawText = response.content

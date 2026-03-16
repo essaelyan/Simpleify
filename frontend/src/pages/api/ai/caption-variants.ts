@@ -16,28 +16,16 @@
  *     brief: { topic: string; tone: string; targetAudience: string; callToAction: string };
  *   }
  *
- * Response:
- *   {
- *     variants: Array<{
- *       caption: string;
- *       hashtags: string[];
- *       hook: string;           // one-line description of the opening approach
- *       angle: string;          // strategic angle (e.g. "problem-agitate-solve")
- *       scores: {
- *         engagementPotential: number;  // 1–10
- *         clarity: number;              // 1–10
- *         ctaStrength: number;          // 1–10
- *         overall: number;              // average
- *       };
- *       reasoning: string;      // why this variant was written this way
- *     }>;
- *     recommendation: string;   // which variant to use and why
- *   }
+ * Response: ApiResponse<{ variants: CaptionVariant[]; recommendation: string }>
+ *   meta: { agent: "caption-variants", platform }
  */
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { NextApiRequest, NextApiResponse } from "next";
 import type { Platform } from "@/types/autoPosting";
+import type { ApiResponse } from "@/types/api";
+import { ok, fail } from "@/lib/apiResponse";
+import { API_ERRORS } from "@/types/api";
 import { PLATFORM_META } from "@/types/autoPosting";
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
@@ -54,7 +42,7 @@ interface CaptionVariantsRequest {
   };
 }
 
-interface CaptionVariant {
+export interface CaptionVariant {
   caption: string;
   hashtags: string[];
   hook: string;
@@ -68,40 +56,29 @@ interface CaptionVariant {
   reasoning: string;
 }
 
-interface CaptionVariantsResponse {
+export interface CaptionVariantsData {
   variants: CaptionVariant[];
   recommendation: string;
-  error?: string;
 }
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<CaptionVariantsResponse>
+  res: NextApiResponse<ApiResponse<CaptionVariantsData>>
 ) {
   if (req.method !== "POST") {
-    return res
-      .status(405)
-      .json({ variants: [], recommendation: "", error: "Method not allowed" });
+    return fail(res, 405, API_ERRORS.METHOD_NOT_ALLOWED, "Method not allowed");
   }
 
   const { platform, originalCaption, hashtags, brief } =
     req.body as CaptionVariantsRequest;
 
   if (!platform || !originalCaption || !brief?.topic) {
-    return res.status(400).json({
-      variants: [],
-      recommendation: "",
-      error: "platform, originalCaption, and brief.topic are required",
-    });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, "platform, originalCaption, and brief.topic are required");
   }
 
   const meta = PLATFORM_META[platform];
   if (!meta) {
-    return res.status(400).json({
-      variants: [],
-      recommendation: "",
-      error: `Unknown platform: ${platform}`,
-    });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, `Unknown platform: ${platform}`);
   }
 
   const prompt = `You are a world-class social media copywriter specialising in A/B testing.
@@ -180,18 +157,15 @@ Respond ONLY with valid JSON, no markdown fences:
       .replace(/\s*```\s*$/, "")
       .trim();
 
-    const parsed = JSON.parse(cleaned) as {
-      variants: CaptionVariant[];
-      recommendation: string;
-    };
+    const parsed = JSON.parse(cleaned) as CaptionVariantsData;
 
     if (!Array.isArray(parsed.variants) || parsed.variants.length !== 3) {
       throw new Error(`Expected 3 variants, got ${parsed.variants?.length ?? 0}`);
     }
 
-    return res.status(200).json(parsed);
+    return ok(res, parsed, { agent: "caption-variants", platform });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Variant generation failed";
-    return res.status(500).json({ variants: [], recommendation: "", error: message });
+    return fail(res, 500, API_ERRORS.INTERNAL_ERROR, message);
   }
 }

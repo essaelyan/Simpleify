@@ -2,10 +2,13 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { NextApiRequest, NextApiResponse } from "next";
 import type {
   OptimizeContentRequest,
-  OptimizeContentResponse,
+  ContentOptimizationHints,
   GAPerformanceData,
   InstagramInsightsData,
 } from "@/types/feedbackLoop";
+import type { ApiResponse } from "@/types/api";
+import { ok, fail } from "@/lib/apiResponse";
+import { API_ERRORS } from "@/types/api";
 import {
   buildOptimizationPrompt,
   parseOptimizationResponse,
@@ -13,22 +16,26 @@ import {
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
+export interface OptimizeContentData {
+  hints: ContentOptimizationHints;
+}
+
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse
+  res: NextApiResponse<ApiResponse<OptimizeContentData>>
 ) {
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return fail(res, 405, API_ERRORS.METHOD_NOT_ALLOWED, "Method not allowed");
   }
 
   const { ga, instagram } = req.body as OptimizeContentRequest;
 
   if (!ga || !instagram) {
-    return res.status(400).json({ error: "ga and instagram data are required" });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, "ga and instagram data are required");
   }
 
   if (!ga.propertyId || !instagram.accountId) {
-    return res.status(400).json({ error: "Invalid ga or instagram data shape" });
+    return fail(res, 400, API_ERRORS.BAD_REQUEST, "Invalid ga or instagram data shape");
   }
 
   try {
@@ -48,22 +55,24 @@ export default async function handler(
       .map((b) => (b as { type: "text"; text: string }).text)
       .join("");
 
-    let hints;
+    let hints: ContentOptimizationHints;
     try {
       hints = parseOptimizationResponse(rawText, ga, instagram);
     } catch (parseErr) {
-      return res.status(422).json({
-        error:
-          parseErr instanceof Error
-            ? parseErr.message
-            : "Claude returned non-JSON or invalid output. Please try again.",
-        raw: rawText,
-      });
+      return fail(
+        res,
+        422,
+        API_ERRORS.PARSE_ERROR,
+        parseErr instanceof Error
+          ? parseErr.message
+          : "Claude returned non-JSON or invalid output. Please try again.",
+        rawText
+      );
     }
 
-    return res.status(200).json({ hints } as OptimizeContentResponse);
+    return ok(res, { hints }, { agent: "feedback-optimizer" });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Optimization failed";
-    return res.status(500).json({ error: message });
+    return fail(res, 500, API_ERRORS.INTERNAL_ERROR, message);
   }
 }
