@@ -26,7 +26,7 @@ import PostHistoryFeed from "@/components/autoPosting/PostHistoryFeed";
 
 function mapPipelineStatus(s: PipelinePlatformResult["status"]): PostStatus {
   if (s === "safety_blocked") return "blocked";
-  // "published" | "qa_rejected" | "no_account" | "failed" are identical in both enums
+  // "published" | "qa_rejected" | "no_account" | "scheduled" | "failed" pass through unchanged
   return s;
 }
 
@@ -185,6 +185,7 @@ function reducer(state: AutoPostingState, action: AutoPostingAction): AutoPostin
           hashtags: result.hashtags ?? existing.hashtags,
           status: uiStatus,
           publishedAt: result.status === "published" ? new Date().toISOString() : null,
+          scheduledAt: result.status === "scheduled" ? (result.scheduledFor ?? null) : null,
           mockPlatformPostId: result.publish?.isMock ? (result.publish.platformPostId ?? null) : null,
           errorMessage: result.reason,
           safetyFlagReason: result.safety?.flagReason ?? null,
@@ -323,7 +324,7 @@ function getPipelineStage(drafts: PlatformDraft[]): PipelineStage {
   if (statuses.some((s) => s === "generating" || s === "regenerating")) return "generate";
   if (statuses.some((s) => s === "safety_checking"))                     return "safety";
   if (statuses.some((s) => s === "publishing"))                          return "publish";
-  if (statuses.every((s) => ["published", "blocked", "qa_rejected", "no_account", "failed"].includes(s))) return "done";
+  if (statuses.every((s) => ["published", "scheduled", "blocked", "qa_rejected", "no_account", "failed"].includes(s))) return "done";
   return "generate";
 }
 
@@ -376,7 +377,7 @@ function StageIndicator({ stage }: { stage: PipelineStage }) {
 
 // ─── Terminal states ──────────────────────────────────────────────────────────
 
-const TERMINAL_STATES: PostStatus[] = ["published", "blocked", "qa_rejected", "no_account", "failed"];
+const TERMINAL_STATES: PostStatus[] = ["published", "scheduled", "blocked", "qa_rejected", "no_account", "failed"];
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
@@ -469,7 +470,7 @@ export default function AutoPostingPage() {
   // All orchestration (brand voice, enrichment, QA, safety, publish, feedback)
   // happens server-side. The UI renders results from the returned payload.
 
-  async function handleGenerateAndPost(brief: ContentBrief) {
+  async function handleGenerateAndPost(brief: ContentBrief, publishAt?: string) {
     const briefId = Date.now().toString(36) + Math.random().toString(36).slice(2);
 
     // Create skeleton drafts so the pipeline tab shows "generating" immediately
@@ -504,7 +505,7 @@ export default function AutoPostingPage() {
       // ── Single server-side pipeline call ─────────────────────────────────
       // /api/pipeline/run orchestrates all agents: brand voice → enrichment →
       // content generation → QA → safety → account check → publish → feedback.
-      const result = await runPipeline({ brief, dateRangeDays: 30 });
+      const result = await runPipeline({ brief, dateRangeDays: 30, publishAt });
 
       // Map each platform result to the PIPELINE_RESULT_RECEIVED payload shape
       const completedPayload: PipelineCompletedPayload = {
@@ -524,6 +525,7 @@ export default function AutoPostingPage() {
           publish: p.publish,
           postId: p.postId,
           reason: p.reason,
+          scheduledFor: p.scheduledFor,
         })),
         feedbackHints: result.feedbackHints,
       };
@@ -568,6 +570,7 @@ export default function AutoPostingPage() {
   const pipelineStage  = getPipelineStage(allDrafts);
 
   const publishedCount  = allDrafts.filter((d) => d.status === "published").length;
+  const scheduledCount  = allDrafts.filter((d) => d.status === "scheduled").length;
   const blockedCount    = allDrafts.filter((d) => d.status === "blocked").length;
   const qaRejectedCount = allDrafts.filter((d) => d.status === "qa_rejected").length;
   const noAccountCount  = allDrafts.filter((d) => d.status === "no_account").length;
@@ -695,6 +698,12 @@ export default function AutoPostingPage() {
                           <span className="flex items-center gap-1.5 text-xs text-emerald-400">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                             {publishedCount} published
+                          </span>
+                        )}
+                        {scheduledCount > 0 && (
+                          <span className="flex items-center gap-1.5 text-xs text-violet-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-violet-500" />
+                            {scheduledCount} scheduled
                           </span>
                         )}
                         {blockedCount > 0 && (

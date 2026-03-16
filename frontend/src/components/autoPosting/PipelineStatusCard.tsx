@@ -38,6 +38,9 @@ function getSteps(status: PostStatus): PipelineSteps {
     // No account — content cleared QA and safety; publish was never attempted
     case "no_account":
       return { generate: "done",   safety: "done",    publish: "skipped" };
+    // Scheduled — content cleared QA and safety; publish deferred to a future time
+    case "scheduled":
+      return { generate: "done",   safety: "done",    publish: "skipped" };
     case "failed":
       return { generate: "done",   safety: "done",    publish: "error"   };
   }
@@ -97,6 +100,8 @@ function cardStyles(status: PostStatus): string {
       return "border-purple-800/40 bg-purple-950/10";
     case "no_account":
       return "border-sky-800/40 bg-sky-950/10";
+    case "scheduled":
+      return "border-violet-800/40 bg-violet-950/10";
     case "failed":
       return "border-red-800/40 bg-red-950/10";
     case "generating":
@@ -117,6 +122,7 @@ const STATUS_PILL: Record<PostStatus, { bg: string; text: string; label: string 
   safety_checking: { bg: "bg-amber-900/30",      text: "text-amber-400",   label: "Safety Check…"       },
   publishing:      { bg: "bg-indigo-900/30",     text: "text-indigo-300",  label: "Publishing…"         },
   published:       { bg: "bg-emerald-900/30",    text: "text-emerald-400", label: "Published"           },
+  scheduled:       { bg: "bg-violet-900/30",     text: "text-violet-400",  label: "Scheduled"           },
   blocked:         { bg: "bg-amber-900/30",      text: "text-amber-400",   label: "Safety Blocked"      },
   qa_rejected:     { bg: "bg-purple-900/30",     text: "text-purple-400",  label: "QA Rejected"         },
   no_account:      { bg: "bg-sky-900/30",        text: "text-sky-400",     label: "No Account"          },
@@ -281,6 +287,26 @@ export default function PipelineStatusCard({ draft, brief }: PipelineStatusCardP
             <p className="text-xs text-sky-300/70 leading-relaxed">
               Content passed QA and safety checks but no {draft.platform} account is connected.
               Connect an account in Settings → Social Accounts to publish.
+            </p>
+          </div>
+        )}
+
+        {/* ── Scheduled — violet, shows when it will publish ── */}
+        {draft.status === "scheduled" && (
+          <div className="bg-violet-950/40 border border-violet-800/40 rounded-lg px-3 py-2.5">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="text-base leading-none">🕐</span>
+              <span className="text-xs font-bold text-violet-400 uppercase tracking-wider">
+                Scheduled
+              </span>
+            </div>
+            <p className="text-xs text-violet-300/70 leading-relaxed">
+              {draft.scheduledAt
+                ? `Queued for ${new Date(draft.scheduledAt).toLocaleString()}`
+                : "Content queued for scheduled publishing."}
+            </p>
+            <p className="text-[10px] text-violet-900/80 mt-1.5 italic">
+              Call <code className="text-violet-800">/api/social/scheduled/process</code> to publish due posts.
             </p>
           </div>
         )}

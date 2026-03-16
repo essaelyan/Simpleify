@@ -29,6 +29,7 @@ export type PostStatus =
   | "safety_checking"  // Safety filter API call in flight
   | "publishing"       // Publish API call in flight
   | "published"        // Successfully published
+  | "scheduled"        // Content approved; queued for future publishing
   | "blocked"          // Safety filter rejected after all retries
   | "qa_rejected"      // Content QA Agent rejected after revision attempt
   | "no_account"       // Content ready but no connected account for this platform
@@ -176,7 +177,7 @@ export interface AdvancedSafetyResponse {
 export interface PipelinePlatformResult {
   platform: Platform;
   /** Status as returned by the server-side pipeline. Mapped to PostStatus in the reducer. */
-  status: "published" | "safety_blocked" | "qa_rejected" | "no_account" | "failed";
+  status: "published" | "safety_blocked" | "qa_rejected" | "no_account" | "failed" | "scheduled";
   caption: string | null;
   hashtags: string[] | null;
   qa: { verdict: string; overallScore: number; attempts: number } | null;
@@ -184,6 +185,8 @@ export interface PipelinePlatformResult {
   publish: { success: boolean; platformPostId: string | null; isMock: boolean } | null;
   postId: string | null;
   reason: string | null;
+  /** ISO timestamp of when this post is scheduled to publish. Non-null only when status = "scheduled". */
+  scheduledFor: string | null;
 }
 
 /** Payload dispatched when /api/pipeline/run returns successfully. */

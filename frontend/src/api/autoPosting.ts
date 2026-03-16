@@ -112,6 +112,8 @@ export async function runPipeline(req: {
   brief: ContentBrief;
   mediaUrl?: string;
   dateRangeDays?: number;
+  /** ISO 8601 datetime string. When in the future, posts are queued as "scheduled". */
+  publishAt?: string;
 }): Promise<PipelineRunData> {
   const { data } = await axios.post<ApiResponse<PipelineRunData>>(
     "/api/pipeline/run",
@@ -119,6 +121,7 @@ export async function runPipeline(req: {
       brief: req.brief,
       mediaUrl: req.mediaUrl ?? "",
       dateRangeDays: req.dateRangeDays ?? 30,
+      publishAt: req.publishAt,
     }
   );
   if (!data.success || !data.data) {
@@ -145,7 +148,7 @@ export async function fetchPostHistory(): Promise<PlatformDraft[]> {
     caption: p.caption,
     hashtags: p.hashtags,
     status: p.status as PostStatus,
-    scheduledAt: null,
+    scheduledAt: p.scheduledAt ?? null,
     publishedAt: p.publishedAt,
     mockPlatformPostId: null,
     errorMessage: p.errorMessage,

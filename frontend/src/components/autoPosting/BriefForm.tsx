@@ -4,7 +4,7 @@ import { PLATFORMS, PLATFORM_META } from "@/types/autoPosting";
 import { useOptimizationStore } from "@/store/optimizationStore";
 
 interface BriefFormProps {
-  onGenerate: (brief: ContentBrief) => void;
+  onGenerate: (brief: ContentBrief, publishAt?: string) => void;
   loading: boolean;
 }
 
@@ -53,8 +53,15 @@ export default function BriefForm({ onGenerate, loading }: BriefFormProps) {
   const [selectedPlatforms, setSelectedPlatforms] = useState<Platform[]>([
     "instagram", "facebook", "linkedin",
   ]);
+  const [scheduleMode, setScheduleMode]       = useState<"now" | "later">("now");
+  const [scheduleDateTime, setScheduleDateTime] = useState("");
   const { hints, isEnabled, toggleEnabled } = useOptimizationStore();
   const activeHints = isEnabled ? hints : null;
+
+  // Minimum datetime for the picker: 5 minutes from now
+  const minDateTime = new Date(Date.now() + 5 * 60 * 1000)
+    .toISOString()
+    .slice(0, 16);
 
   function togglePlatform(platform: Platform) {
     setSelectedPlatforms((prev) =>
@@ -66,6 +73,8 @@ export default function BriefForm({ onGenerate, loading }: BriefFormProps) {
 
   function handleSubmit() {
     if (!topic.trim() || selectedPlatforms.length === 0) return;
+    if (scheduleMode === "later" && !scheduleDateTime) return;
+
     const brief: ContentBrief = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2),
       topic: topic.trim(),
@@ -79,10 +88,20 @@ export default function BriefForm({ onGenerate, loading }: BriefFormProps) {
       enrichment: null,
       qaRevisionGuidance: null,
     };
-    onGenerate(brief);
+
+    const publishAt =
+      scheduleMode === "later" && scheduleDateTime
+        ? new Date(scheduleDateTime).toISOString()
+        : undefined;
+
+    onGenerate(brief, publishAt);
   }
 
-  const canSubmit = topic.trim().length > 0 && selectedPlatforms.length > 0 && !loading;
+  const canSubmit =
+    topic.trim().length > 0 &&
+    selectedPlatforms.length > 0 &&
+    !loading &&
+    (scheduleMode === "now" || (scheduleMode === "later" && !!scheduleDateTime));
 
   return (
     <div className="space-y-3">
@@ -259,6 +278,67 @@ export default function BriefForm({ onGenerate, loading }: BriefFormProps) {
         </div>
       </Section>
 
+      {/* ── 04 Scheduling ───────────────────────────────────────────────────── */}
+      <Section
+        num="04"
+        title="Scheduling"
+        aside={
+          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
+            scheduleMode === "later"
+              ? "bg-violet-900/40 text-violet-400 border-violet-800/50"
+              : "bg-gray-800 text-gray-600 border-gray-700"
+          }`}>
+            {scheduleMode === "later" ? "Scheduled" : "Immediate"}
+          </span>
+        }
+      >
+        <div className="space-y-3">
+          {/* Toggle */}
+          <div className="flex gap-2">
+            {(["now", "later"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setScheduleMode(mode)}
+                className={[
+                  "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all duration-150",
+                  scheduleMode === mode
+                    ? mode === "now"
+                      ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-300"
+                      : "bg-violet-600/20 border-violet-500/50 text-violet-300"
+                    : "bg-gray-800/50 border-gray-700/60 text-gray-500 hover:border-gray-600 hover:text-gray-300",
+                ].join(" ")}
+              >
+                <span>{mode === "now" ? "⚡" : "🕐"}</span>
+                <span>{mode === "now" ? "Publish Now" : "Schedule for Later"}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Datetime picker — only visible in "later" mode */}
+          {scheduleMode === "later" && (
+            <div>
+              <label className="block text-[11px] font-semibold uppercase tracking-wider text-gray-500 mb-2">
+                Publish At
+              </label>
+              <input
+                type="datetime-local"
+                value={scheduleDateTime}
+                min={minDateTime}
+                onChange={(e) => setScheduleDateTime(e.target.value)}
+                className="w-full bg-gray-800/60 border border-gray-700/80 rounded-lg px-3 py-2.5 text-sm text-gray-100 focus:outline-none focus:border-violet-500/60 focus:ring-1 focus:ring-violet-500/20 transition-colors [color-scheme:dark]"
+              />
+              {scheduleDateTime && (
+                <p className="mt-1.5 text-[11px] text-violet-400/70">
+                  Content will be generated now and queued for{" "}
+                  {new Date(scheduleDateTime).toLocaleString()}.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </Section>
+
       {/* ── Generate button ─────────────────────────────────────────────────── */}
       <button
         onClick={handleSubmit}
@@ -277,7 +357,7 @@ export default function BriefForm({ onGenerate, loading }: BriefFormProps) {
           </>
         ) : (
           <>
-            <span>Generate &amp; Auto-Post</span>
+            <span>{scheduleMode === "later" ? "Generate & Schedule" : "Generate & Auto-Post"}</span>
             <span className={canSubmit ? "text-indigo-300" : "text-gray-600"}>→</span>
           </>
         )}

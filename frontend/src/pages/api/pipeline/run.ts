@@ -95,6 +95,7 @@ export type PlatformStatus =
   | "safety_blocked"
   | "qa_rejected"
   | "no_account"
+  | "scheduled"
   | "failed";
 
 export interface QASummary {
@@ -135,12 +136,14 @@ export interface PlatformPipelineResult {
   qa: QASummary | null;
   /** Safety result. Null if QA rejected before safety ran. */
   safety: SafetySummary | null;
-  /** Publish outcome. Null if not attempted (qa_rejected / safety_blocked / no_account / failed). */
+  /** Publish outcome. Null if not attempted (qa_rejected / safety_blocked / no_account / scheduled / failed). */
   publish: PublishSummary | null;
   /** DB id of the persisted SocialPost record. */
   postId: string | null;
   /** Human-readable reason explaining a non-published status. */
   reason: string | null;
+  /** ISO timestamp of when this post is scheduled to publish. Non-null only when status = "scheduled". */
+  scheduledFor: string | null;
 }
 
 // ─── Request / Response Contract ─────────────────────────────────────────────
@@ -149,6 +152,12 @@ interface PipelineRunRequest {
   brief: ContentBrief;
   /** Media URL attached to this post. Defaults to "" when no media is provided. */
   mediaUrl?: string;
+  /**
+   * ISO 8601 datetime string. When present and in the future, all platforms skip
+   * the publish step and are stored with postStatus="scheduled".
+   * Omit (or pass a past time) for immediate publishing.
+   */
+  publishAt?: string;
 }
 
 /** Shape of the `data` field in ApiResponse<PipelineRunData>. */
@@ -479,7 +488,9 @@ async function processPlatform(
   account: { accessToken: string; authorUrn?: string } | null,
   mediaUrl: string,
   /** Captions of all other platforms in this batch — used for duplication detection. */
-  otherPlatformCaptions: string[]
+  otherPlatformCaptions: string[],
+  /** When non-null and in the future, skip publish and store as "scheduled". */
+  publishAt: Date | null
 ): Promise<PlatformPipelineResult> {
   const platform = draft.platform as Platform;
 
@@ -525,6 +536,7 @@ async function processPlatform(
         publish: null,
         postId: record.id,
         reason: qaResult?.revisionGuidance ?? "Content quality below threshold",
+        scheduledFor: null,
       };
     }
 
@@ -566,6 +578,7 @@ async function processPlatform(
         publish: null,
         postId: record.id,
         reason: flagReason ?? "Safety check failed",
+        scheduledFor: null,
       };
     }
 
@@ -594,10 +607,41 @@ async function processPlatform(
         publish: null,
         postId: record.id,
         reason: "No connected account for this platform",
+        scheduledFor: null,
       };
     }
 
-    // ── 4d: Social Publishing Agent ────────────────────────────────────────
+    // ── 4d: Scheduling check ───────────────────────────────────────────────
+    // If publishAt is in the future, store as "scheduled" and skip publish.
+    // The scheduled/process route will publish this post when the time arrives.
+    if (publishAt && publishAt > new Date()) {
+      const record = await prisma.socialPost.create({
+        data: {
+          platform,
+          mediaUrl,
+          caption: safeDraft.caption,
+          hashtags: JSON.stringify(safeDraft.hashtags),
+          postStatus: "scheduled",
+          publishAt,
+          success: false,
+        },
+      });
+      plog(platform, `status=scheduled  publishAt=${publishAt.toISOString()}  postId=${record.id}`);
+      return {
+        platform,
+        status: "scheduled",
+        caption: safeDraft.caption,
+        hashtags: safeDraft.hashtags,
+        qa: toQASummary(qaResult, qaAttempts),
+        safety: { passed: true, attempts: safetyAttempts, flagReason: null },
+        publish: null,
+        postId: record.id,
+        reason: `Scheduled for ${publishAt.toISOString()}`,
+        scheduledFor: publishAt.toISOString(),
+      };
+    }
+
+    // ── 4e: Social Publishing Agent ────────────────────────────────────────
     // Owned by: socialPublisher.ts
     // Publishes the QA-approved, safety-cleared draft to the live platform.
     // SOCIAL_PUBLISH_MOCK=true → returns a mock post ID (default for dev).
@@ -648,6 +692,7 @@ async function processPlatform(
       },
       postId: record.id,
       reason: publishResult.success ? null : "Publish API returned a failure",
+      scheduledFor: null,
     };
   } catch (err) {
     // Unexpected runtime error — log and return a failed result so other
@@ -681,6 +726,7 @@ async function processPlatform(
       publish: null,
       postId: null,
       reason: message,
+      scheduledFor: null,
     };
   }
 }
@@ -707,7 +753,15 @@ export default async function handler(
   }
 
   const startedAt = new Date().toISOString();
-  const { brief, mediaUrl = "" } = req.body as PipelineRunRequest;
+  const { brief, mediaUrl = "", publishAt: publishAtStr } = req.body as PipelineRunRequest;
+
+  // Parse publishAt — treat past or invalid dates as "publish now"
+  const publishAt: Date | null = (() => {
+    if (!publishAtStr) return null;
+    const d = new Date(publishAtStr);
+    if (isNaN(d.getTime()) || d <= new Date()) return null;
+    return d;
+  })();
 
   if (!brief?.topic || !brief?.selectedPlatforms?.length) {
     fail(res, 400, API_ERRORS.BAD_REQUEST, "brief.topic and brief.selectedPlatforms are required");
@@ -839,7 +893,8 @@ export default async function handler(
           brandVoice,
           accountByPlatform[draft.platform] ?? null,
           mediaUrl,
-          otherCaptions
+          otherCaptions,
+          publishAt
         );
       })
     );

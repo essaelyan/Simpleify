@@ -22,7 +22,7 @@ import prisma from "@/lib/prisma";
 function mapDbStatus(dbStatus: string): string {
   // The pipeline stores "safety_blocked"; the UI calls it "blocked"
   if (dbStatus === "safety_blocked") return "blocked";
-  // published, failed, qa_rejected, no_account are identical in both namespaces
+  // published, failed, qa_rejected, no_account, scheduled are identical in both namespaces
   return dbStatus;
 }
 
@@ -35,6 +35,8 @@ export interface HistoryPost {
   status: string;
   /** ISO timestamp — populated when status = "published", null otherwise. */
   publishedAt: string | null;
+  /** ISO timestamp — populated when status = "scheduled", null otherwise. */
+  scheduledAt: string | null;
   /** Human-readable safety or QA block reason (status = "blocked"). */
   flagReason: string | null;
   /** Human-readable error description (status = "failed"). */
@@ -66,6 +68,7 @@ export default async function handler(
         postStatus: true,
         flagReason: true,
         success: true,
+        publishAt: true,
         createdAt: true,
       },
     });
@@ -87,6 +90,7 @@ export default async function handler(
         hashtags,
         status: uiStatus,
         publishedAt: uiStatus === "published" ? r.createdAt.toISOString() : null,
+        scheduledAt: uiStatus === "scheduled" ? (r.publishAt?.toISOString() ?? null) : null,
         flagReason: uiStatus === "blocked" ? (r.flagReason ?? null) : null,
         errorMessage: uiStatus === "failed" ? (r.flagReason ?? "Publish failed") : null,
       };
