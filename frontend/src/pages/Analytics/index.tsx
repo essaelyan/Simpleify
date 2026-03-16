@@ -1,5 +1,19 @@
+/**
+ * Analytics Insights page
+ *
+ * Previously broken: treated the /api/analytics-insights response as
+ * ContentBlock[] and tried to map over it, rendering nothing.
+ *
+ * Fixed: uses the typed AnalyticsInsights shape from src/api/agents.ts
+ * and renders each insight section as a structured card.
+ *
+ * Added: "Build Growth Strategy" CTA — prefills /GrowthStrategy with the
+ * best traffic source, top audience, and top content from the insights.
+ */
+
 import { useState } from "react";
-import { getAnalyticsInsights } from "@/api/analytics";
+import Link from "next/link";
+import { getAnalyticsInsights, type AnalyticsInsights } from "@/api/agents";
 
 const SAMPLE_DATA = {
   traffic: [
@@ -20,11 +34,9 @@ const SAMPLE_DATA = {
   ],
 };
 
-type ContentBlock = { type: string; text?: string };
-
 export default function AnalyticsPage() {
   const [input, setInput] = useState(JSON.stringify(SAMPLE_DATA, null, 2));
-  const [insights, setInsights] = useState<ContentBlock[] | null>(null);
+  const [insights, setInsights] = useState<AnalyticsInsights | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,6 +54,15 @@ export default function AnalyticsPage() {
       setLoading(false);
     }
   }
+
+  // Build query string for Growth Strategy pre-fill
+  const strategyHref = insights
+    ? `/GrowthStrategy?bestTrafficSource=${encodeURIComponent(
+        insights.bestTrafficSource.source
+      )}&topAudience=${encodeURIComponent(
+        insights.highestConvertingAudience.segment
+      )}&topContent=${encodeURIComponent(insights.topPerformingContent.title)}`
+    : "/GrowthStrategy";
 
   return (
     <div className="p-8 text-gray-100">
@@ -79,20 +100,99 @@ export default function AnalyticsPage() {
           </div>
         )}
 
-        {/* Results */}
+        {/* ── Structured Results ── */}
         {insights && (
-          <div className="mt-8">
-            <h2 className="text-xl font-semibold mb-4">AI Insights</h2>
-            <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 whitespace-pre-wrap text-sm leading-relaxed text-gray-200">
-              {insights
-                .filter((block) => block.type === "text" && block.text)
-                .map((block, i) => (
-                  <p key={i}>{block.text}</p>
-                ))}
+          <div className="mt-8 space-y-6">
+            <h2 className="text-xl font-semibold">AI Insights</h2>
+
+            {/* Three insight cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <InsightCard
+                icon="📈"
+                label="Best Traffic Source"
+                value={insights.bestTrafficSource.source}
+                reasoning={insights.bestTrafficSource.reasoning}
+              />
+              <InsightCard
+                icon="🎯"
+                label="Top Converting Audience"
+                value={insights.highestConvertingAudience.segment}
+                reasoning={insights.highestConvertingAudience.reasoning}
+              />
+              <InsightCard
+                icon="🏆"
+                label="Top Performing Content"
+                value={insights.topPerformingContent.title}
+                reasoning={insights.topPerformingContent.reasoning}
+              />
+            </div>
+
+            {/* Quick wins */}
+            {insights.quickWins.length > 0 && (
+              <div className="bg-gray-900 border border-gray-700 rounded-xl p-5">
+                <p className="text-sm font-semibold text-indigo-400 mb-3">Quick Wins</p>
+                <ol className="space-y-2">
+                  {insights.quickWins.map((win, i) => (
+                    <li key={i} className="flex gap-3 text-sm text-gray-300">
+                      <span className="text-indigo-500 font-semibold shrink-0">{i + 1}.</span>
+                      <span className="leading-relaxed">{win}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+
+            {/* Summary */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl p-5">
+              <p className="text-sm font-semibold text-gray-400 mb-2">Summary</p>
+              <p className="text-sm text-gray-300 leading-relaxed">{insights.summary}</p>
+            </div>
+
+            {/* CTA to Growth Strategy */}
+            <div className="flex items-center justify-between bg-indigo-950/40 border border-indigo-800/40 rounded-xl px-5 py-4">
+              <div>
+                <p className="text-sm font-semibold text-indigo-300">
+                  Ready to act on these insights?
+                </p>
+                <p className="text-xs text-indigo-400/70 mt-0.5">
+                  Generate a full growth strategy pre-filled with your top data points.
+                </p>
+              </div>
+              <Link
+                href={strategyHref}
+                className="shrink-0 text-sm bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-4 py-2 rounded-lg transition-colors ml-4"
+              >
+                Build Strategy →
+              </Link>
             </div>
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function InsightCard({
+  icon,
+  label,
+  value,
+  reasoning,
+}: {
+  icon: string;
+  label: string;
+  value: string;
+  reasoning: string;
+}) {
+  return (
+    <div className="bg-gray-900 border border-gray-700 rounded-xl p-4 space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="text-lg">{icon}</span>
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          {label}
+        </span>
+      </div>
+      <p className="text-sm font-semibold text-gray-100">{value}</p>
+      <p className="text-xs text-gray-500 leading-relaxed">{reasoning}</p>
     </div>
   );
 }

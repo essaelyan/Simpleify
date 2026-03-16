@@ -32,12 +32,18 @@ export default function SocialMediaPage() {
           </ul>
         </div>
 
-        <div className="mt-6">
+        <div className="mt-6 flex flex-wrap gap-3">
           <Link
             href="/SocialMedia/AutoPosting"
             className="inline-block bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-6 py-2.5 rounded-lg transition-colors text-sm"
           >
             Try Auto Posting →
+          </Link>
+          <Link
+            href="/SocialMedia/Repurpose"
+            className="inline-block bg-gray-800 hover:bg-gray-700 border border-gray-600 text-gray-200 font-semibold px-6 py-2.5 rounded-lg transition-colors text-sm"
+          >
+            Repurpose Content →
           </Link>
         </div>
       </div>

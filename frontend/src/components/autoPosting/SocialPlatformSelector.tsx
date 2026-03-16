@@ -146,15 +146,14 @@ export default function SocialPlatformSelector({
             hashtags: publishContent.hashtags,
             media_url: publishContent.mediaUrl,
           });
+          // publishToPlatform throws on error; if we reach here it succeeded.
           const status: PlatformPublishStatus = res.safetyBlocked
             ? "safety_blocked"
-            : res.success
-              ? "published"
-              : "failed";
+            : "published";
           result = {
             status,
-            platformPostId: res.platform_post_id,
-            flagReason: res.flagReason,
+            platformPostId: res.platform_post_id ?? undefined,
+            flagReason: res.flagReason ?? undefined,
           };
         } catch (err) {
           result = {

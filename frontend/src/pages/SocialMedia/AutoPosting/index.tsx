@@ -1,18 +1,31 @@
+// /api/pipeline/run is now the single source of truth for the Auto Posting workflow.
+// The UI is a pure presentation layer over the PipelineRunData it returns.
 import { useEffect, useReducer } from "react";
 import type {
   AutoPostingAction,
   AutoPostingState,
   ContentBrief,
+  PipelineCompletedPayload,
+  PipelinePlatformResult,
   PlatformDraft,
   PostBrief,
   PostStatus,
 } from "@/types/autoPosting";
-import { generateContent, checkSafetyAdvanced, publishPost } from "@/api/autoPosting";
+import { runPipeline, fetchPostHistory } from "@/api/autoPosting";
 import { fetchLatestHints } from "@/api/feedbackLoop";
 import { useOptimizationStore } from "@/store/optimizationStore";
 import BriefForm from "@/components/autoPosting/BriefForm";
 import PipelineStatusCard from "@/components/autoPosting/PipelineStatusCard";
 import PostHistoryFeed from "@/components/autoPosting/PostHistoryFeed";
+
+// ─── Pipeline status mapper ────────────────────────────────────────────────────
+// Maps server-side PlatformStatus values to UI PostStatus values.
+
+function mapPipelineStatus(s: PipelinePlatformResult["status"]): PostStatus {
+  if (s === "safety_blocked") return "blocked";
+  // "published" | "qa_rejected" | "no_account" | "failed" are identical in both enums
+  return s;
+}
 
 // ─── Reducer ──────────────────────────────────────────────────────────────────
 
@@ -123,6 +136,7 @@ function reducer(state: AutoPostingState, action: AutoPostingAction): AutoPostin
       const updatedBrief = mutateDraft(state.currentBrief, action.payload.draftId, {
         status: "published",
         publishedAt: action.payload.publishedAt,
+        mockPlatformPostId: action.payload.mockPlatformPostId || null,
       });
       const publishedDraft = updatedBrief.drafts.find(
         (d) => d.id === action.payload.draftId
@@ -150,6 +164,51 @@ function reducer(state: AutoPostingState, action: AutoPostingAction): AutoPostin
       };
     }
 
+    // ── Single-call pipeline result ────────────────────────────────────────
+    // /api/pipeline/run returned — map each PlatformPipelineResult to a
+    // PlatformDraft update and push terminal drafts into history.
+    case "PIPELINE_RESULT_RECEIVED": {
+      if (!state.currentBrief) return state;
+      let updatedBrief = state.currentBrief;
+      const newHistory: PlatformDraft[] = [];
+
+      for (const result of action.payload.platforms) {
+        const existing = updatedBrief.drafts.find((d) => d.platform === result.platform);
+        if (!existing) continue;
+
+        const uiStatus = mapPipelineStatus(result.status);
+        updatedBrief = mutateDraft(updatedBrief, existing.id, {
+          caption: result.caption ?? existing.caption,
+          hashtags: result.hashtags ?? existing.hashtags,
+          status: uiStatus,
+          publishedAt: result.status === "published" ? new Date().toISOString() : null,
+          mockPlatformPostId: result.publish?.isMock ? (result.publish.platformPostId ?? null) : null,
+          errorMessage: result.reason,
+          safetyFlagReason: result.safety?.flagReason ?? null,
+          qaScore: result.qa?.overallScore ?? null,
+          qaVerdict: result.qa?.verdict ?? null,
+        });
+
+        // All terminal states go into history
+        const updated = updatedBrief.drafts.find((d) => d.id === existing.id)!;
+        newHistory.push(updated);
+      }
+
+      return {
+        ...state,
+        currentBrief: updatedBrief,
+        history: [...newHistory, ...state.history],
+      };
+    }
+
+    // ── DB history hydration on mount ─────────────────────────────────────
+    // Populates history from social_posts so a browser refresh doesn't wipe
+    // visible history.  No-ops when session history already has items so an
+    // in-progress pipeline run is never overwritten.
+    case "HISTORY_LOADED":
+      if (state.history.length > 0) return state;
+      return { ...state, history: action.payload };
+
     case "CLEAR_BRIEF":
       return { ...state, currentBrief: null, activeTab: "setup" };
 
@@ -158,9 +217,72 @@ function reducer(state: AutoPostingState, action: AutoPostingAction): AutoPostin
   }
 }
 
-// ─── Page ─────────────────────────────────────────────────────────────────────
+// ─── Live pipeline stage indicator ───────────────────────────────────────────
 
-const TERMINAL_STATES: PostStatus[] = ["published", "blocked", "failed"];
+type PipelineStage = "idle" | "generate" | "safety" | "publish" | "done";
+
+function getPipelineStage(drafts: PlatformDraft[]): PipelineStage {
+  if (drafts.length === 0) return "idle";
+  const statuses = drafts.map((d) => d.status);
+  if (statuses.some((s) => s === "generating" || s === "regenerating")) return "generate";
+  if (statuses.some((s) => s === "safety_checking"))                     return "safety";
+  if (statuses.some((s) => s === "publishing"))                          return "publish";
+  if (statuses.every((s) => ["published", "blocked", "qa_rejected", "no_account", "failed"].includes(s))) return "done";
+  return "generate";
+}
+
+const STAGE_STEPS: Array<{ id: PipelineStage; label: string; icon: string }> = [
+  { id: "generate", label: "Generate",   icon: "✦" },
+  { id: "safety",   label: "Safety",     icon: "🛡" },
+  { id: "publish",  label: "Publish",    icon: "↑" },
+  { id: "done",     label: "Complete",   icon: "✓" },
+];
+
+function StageIndicator({ stage }: { stage: PipelineStage }) {
+  const stageOrder: PipelineStage[] = ["idle", "generate", "safety", "publish", "done"];
+  const currentIdx = stageOrder.indexOf(stage);
+
+  return (
+    <div className="flex items-center gap-1">
+      {STAGE_STEPS.map((step, i) => {
+        const stepIdx = stageOrder.indexOf(step.id);
+        const isPast    = stepIdx < currentIdx;
+        const isActive  = step.id === stage;
+        const isFuture  = stepIdx > currentIdx;
+
+        return (
+          <div key={step.id} className="flex items-center gap-1">
+            <div
+              className={[
+                "flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold transition-all duration-300",
+                isActive
+                  ? "bg-indigo-600/20 border border-indigo-600/40 text-indigo-300"
+                  : isPast
+                  ? "text-emerald-500/70"
+                  : "text-gray-700",
+              ].join(" ")}
+            >
+              {isActive && (
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse flex-shrink-0" />
+              )}
+              {isPast && <span className="text-emerald-500">✓</span>}
+              <span>{step.label}</span>
+            </div>
+            {i < STAGE_STEPS.length - 1 && (
+              <span className={`text-xs ${isPast ? "text-emerald-800" : "text-gray-800"}`}>→</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Terminal states ──────────────────────────────────────────────────────────
+
+const TERMINAL_STATES: PostStatus[] = ["published", "blocked", "qa_rejected", "no_account", "failed"];
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function AutoPostingPage() {
   const [state, dispatch] = useReducer(reducer, initialState);
@@ -173,55 +295,65 @@ export default function AutoPostingPage() {
       try {
         const hints = await fetchLatestHints();
         if (!hints) return;
-        // Only overwrite if DB snapshot is newer than what's in localStorage
         if (!lastFetchedAt || hints.generatedAt > lastFetchedAt) {
           setHints(hints);
         }
       } catch {
-        // Non-critical — store keeps its last known value
+        // Non-critical
       }
     }
     syncLatestHints();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // run once on mount
+  }, []);
 
-  // ── After every pipeline run: regenerate optimization hints ──────────────
+  // ── On mount: hydrate history from DB so refresh doesn't clear it ─────────
+  useEffect(() => {
+    async function loadHistory() {
+      try {
+        const drafts = await fetchPostHistory();
+        if (drafts.length > 0) {
+          dispatch({ type: "HISTORY_LOADED", payload: drafts });
+        }
+      } catch {
+        // Non-critical — history starts empty if the fetch fails
+      }
+    }
+    loadHistory();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Derive allTerminalInEffect for the pipeline "done" state ─────────────
+  // Used only for UI: stage indicator, completion summary, in-progress count.
+  // Feedback hints are now returned directly by /api/pipeline/run and updated
+  // in the store from handleGenerateAndPost — no separate useEffect needed.
   const allDraftsInState = state.currentBrief?.drafts ?? [];
   const allTerminalInEffect =
     allDraftsInState.length > 0 &&
     allDraftsInState.every((d) => TERMINAL_STATES.includes(d.status));
 
-  useEffect(() => {
-    if (!allTerminalInEffect) return;
-    async function runFeedbackLoop() {
-      try {
-        const hints = await fetchLatestHints();
-        if (hints) setHints(hints);
-      } catch {
-        // Non-critical — generation still succeeded
-      }
-    }
-    runFeedbackLoop();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allTerminalInEffect]);
-
   // ── Pipeline entry point ──────────────────────────────────────────────────
+  // Single POST /api/pipeline/run replaces the old 3-step client-side loop.
+  // All orchestration (brand voice, enrichment, QA, safety, publish, feedback)
+  // happens server-side. The UI renders results from the returned payload.
 
   async function handleGenerateAndPost(brief: ContentBrief) {
     const briefId = Date.now().toString(36) + Math.random().toString(36).slice(2);
 
-    // Build skeleton PostBrief with all drafts at "generating"
+    // Create skeleton drafts so the pipeline tab shows "generating" immediately
     const skeletonDrafts: PlatformDraft[] = brief.selectedPlatforms.map((platform) => ({
       id: `${briefId}-${platform}`,
       platform,
       caption: "",
       hashtags: [],
-      status: "generating",
+      status: "generating" as PostStatus,
       scheduledAt: null,
       publishedAt: null,
+      mockPlatformPostId: null,
       errorMessage: null,
       safetyFlagReason: null,
       safetySeverity: null,
+      qaScore: null,
+      qaVerdict: null,
       mediaUrl: null,
       mediaType: null,
     }));
@@ -233,164 +365,49 @@ export default function AutoPostingPage() {
       createdAt: new Date().toISOString(),
     };
 
-    // Switch to pipeline tab immediately
     dispatch({ type: "PIPELINE_STARTED", payload: postBrief });
 
-    // ── Step 1: Batch generate all platform captions ──────────────────────
-
-    let generatedPlatforms: Array<{ draftId: string; caption: string; hashtags: string[] }>;
     try {
-      const result = await generateContent(brief);
-      generatedPlatforms = result.platforms.map((p) => ({
-        draftId: `${briefId}-${p.platform}`,
-        caption: p.caption,
-        hashtags: p.hashtags,
-      }));
-      for (const gp of generatedPlatforms) {
-        dispatch({ type: "CONTENT_GENERATED", payload: gp });
+      // ── Single server-side pipeline call ─────────────────────────────────
+      // /api/pipeline/run orchestrates all agents: brand voice → enrichment →
+      // content generation → QA → safety → account check → publish → feedback.
+      const result = await runPipeline({ brief, dateRangeDays: 30 });
+
+      // Map each platform result to the PIPELINE_RESULT_RECEIVED payload shape
+      const completedPayload: PipelineCompletedPayload = {
+        briefId: result.briefId,
+        enrichment: result.enrichment
+          ? { success: result.enrichment.success, summary: result.enrichment.summary }
+          : null,
+        platforms: result.platforms.map((p) => ({
+          platform: p.platform,
+          status: p.status,
+          caption: p.caption,
+          hashtags: p.hashtags,
+          qa: p.qa
+            ? { verdict: p.qa.verdict, overallScore: p.qa.overallScore, attempts: p.qa.attempts }
+            : null,
+          safety: p.safety,
+          publish: p.publish,
+          postId: p.postId,
+          reason: p.reason,
+        })),
+        feedbackHints: result.feedbackHints,
+      };
+
+      dispatch({ type: "PIPELINE_RESULT_RECEIVED", payload: completedPayload });
+
+      // If the pipeline returned fresh feedback hints, update the optimization store
+      if (result.feedbackHints) {
+        setHints(result.feedbackHints);
       }
     } catch (err) {
-      // Fail all drafts if batch generation fails
+      // Catastrophic failure (network error, 500, etc.) — mark all platforms failed
+      const message = err instanceof Error ? err.message : "Pipeline failed";
       for (const draft of skeletonDrafts) {
         dispatch({
           type: "PUBLISHING_FAILED",
-          payload: {
-            draftId: draft.id,
-            errorMessage: err instanceof Error ? err.message : "Content generation failed",
-          },
-        });
-      }
-      dispatch({ type: "SET_LOADING", payload: false });
-      return;
-    }
-
-    // ── Step 2: Safety check (with 1-retry feedback loop) + publish ───────
-
-    for (const gp of generatedPlatforms) {
-      const draft = skeletonDrafts.find((d) => d.id === gp.draftId)!;
-
-      let currentCaption = gp.caption;
-      let currentHashtags = gp.hashtags;
-      let safetyPassed = false;
-
-      for (let attempt = 0; attempt < 2; attempt++) {
-        dispatch({ type: "SAFETY_CHECK_STARTED", payload: { draftId: gp.draftId } });
-
-        let safetyResult;
-        try {
-          safetyResult = await checkSafetyAdvanced({
-            draftId: gp.draftId,
-            platform: draft.platform,
-            caption: currentCaption,
-            hashtags: currentHashtags,
-            brandVoice: null,
-            recentCaptions: [],
-          });
-        } catch {
-          dispatch({
-            type: "PUBLISHING_FAILED",
-            payload: {
-              draftId: gp.draftId,
-              errorMessage: "Safety check unavailable — please try again",
-            },
-          });
-          break;
-        }
-
-        if (safetyResult.safe) {
-          safetyPassed = true;
-          break;
-        }
-
-        // Failed — try a 1-time regeneration with hints
-        if (attempt === 0 && safetyResult.regenerationHints !== null) {
-          dispatch({ type: "REGENERATION_STARTED", payload: { draftId: gp.draftId } });
-          try {
-            const retryBrief = {
-              ...brief,
-              selectedPlatforms: [draft.platform] as typeof brief.selectedPlatforms,
-              safetyFeedback: safetyResult.regenerationHints,
-            };
-            const retryResult = await generateContent(retryBrief);
-            const retryContent = retryResult.platforms[0];
-            currentCaption = retryContent.caption;
-            currentHashtags = retryContent.hashtags;
-            dispatch({
-              type: "CONTENT_GENERATED",
-              payload: {
-                draftId: gp.draftId,
-                caption: currentCaption,
-                hashtags: currentHashtags,
-              },
-            });
-          } catch {
-            // Regeneration failed → block immediately
-            dispatch({
-              type: "SAFETY_CHECK_BLOCKED",
-              payload: {
-                draftId: gp.draftId,
-                flagReason: safetyResult.flagReason ?? "Content policy violation",
-                severity: safetyResult.severity ?? "medium",
-              },
-            });
-            break;
-          }
-          continue; // loop to re-run safety check on new content
-        }
-
-        // No hints or second attempt failed → block
-        dispatch({
-          type: "SAFETY_CHECK_BLOCKED",
-          payload: {
-            draftId: gp.draftId,
-            flagReason: safetyResult.flagReason ?? "Content policy violation",
-            severity: safetyResult.severity ?? "medium",
-          },
-        });
-        break;
-      }
-
-      if (!safetyPassed) continue;
-
-      // Safety passed → publish
-      dispatch({ type: "SAFETY_CHECK_PASSED", payload: { draftId: gp.draftId } });
-      dispatch({ type: "PUBLISHING_STARTED", payload: { draftId: gp.draftId } });
-
-      try {
-        const pubResult = await publishPost({
-          draftId: gp.draftId,
-          platform: draft.platform,
-          caption: currentCaption,
-          hashtags: currentHashtags,
-          scheduledAt: null,
-          mediaUrl: null,
-        });
-
-        if (pubResult.success && pubResult.publishedAt) {
-          dispatch({
-            type: "PUBLISHING_SUCCESS",
-            payload: {
-              draftId: gp.draftId,
-              publishedAt: pubResult.publishedAt,
-              mockPlatformPostId: pubResult.mockPlatformPostId ?? "",
-            },
-          });
-        } else {
-          dispatch({
-            type: "PUBLISHING_FAILED",
-            payload: {
-              draftId: gp.draftId,
-              errorMessage: pubResult.errorMessage ?? "Publish failed",
-            },
-          });
-        }
-      } catch (err) {
-        dispatch({
-          type: "PUBLISHING_FAILED",
-          payload: {
-            draftId: gp.draftId,
-            errorMessage: err instanceof Error ? err.message : "Publish failed",
-          },
+          payload: { draftId: draft.id, errorMessage: message },
         });
       }
     }
@@ -400,70 +417,73 @@ export default function AutoPostingPage() {
 
   // ── Derived values ────────────────────────────────────────────────────────
 
-  const allDrafts = state.currentBrief?.drafts ?? [];
-  const inProgressCount = allDrafts.filter(
-    (d) => !TERMINAL_STATES.includes(d.status)
-  ).length;
-  const allTerminal = allTerminalInEffect;
+  const allDrafts      = state.currentBrief?.drafts ?? [];
+  const inProgressCount = allDrafts.filter((d) => !TERMINAL_STATES.includes(d.status)).length;
+  const allTerminal    = allTerminalInEffect;
+  const pipelineStage  = getPipelineStage(allDrafts);
+
+  const publishedCount  = allDrafts.filter((d) => d.status === "published").length;
+  const blockedCount    = allDrafts.filter((d) => d.status === "blocked").length;
+  const qaRejectedCount = allDrafts.filter((d) => d.status === "qa_rejected").length;
+  const noAccountCount  = allDrafts.filter((d) => d.status === "no_account").length;
+  const failedCount     = allDrafts.filter((d) => d.status === "failed").length;
 
   // ── Tabs ──────────────────────────────────────────────────────────────────
 
   const tabs: { id: AutoPostingState["activeTab"]; label: string; badge?: number }[] = [
-    { id: "setup", label: "Setup" },
+    { id: "setup",    label: "Setup"   },
     {
-      id: "pipeline",
-      label: "Pipeline",
+      id: "pipeline", label: "Pipeline",
       badge: inProgressCount > 0 ? inProgressCount : allDrafts.length > 0 ? allDrafts.length : undefined,
     },
     {
-      id: "history",
-      label: "History",
+      id: "history",  label: "History",
       badge: state.history.length > 0 ? state.history.length : undefined,
     },
   ];
 
   return (
-    <div className="p-8 text-gray-100">
+    <div className="p-8 text-gray-100 min-h-screen">
       <div className="max-w-5xl mx-auto">
-        {/* Header */}
-        <p className="text-xs font-semibold uppercase tracking-widest text-pink-400 mb-2">
-          AI Social Media Manager
-        </p>
-        <h1 className="text-3xl font-bold mb-1">Auto Posting</h1>
-        <p className="text-gray-400 mb-8">
-          AI generates content, runs a safety filter, and publishes automatically — no manual steps.
-        </p>
 
-        {/* Workflow diagram */}
-        <div className="flex items-center gap-2 mb-8 text-xs text-gray-500 font-medium">
-          <span className="bg-gray-900 border border-gray-700 px-3 py-1.5 rounded-lg">✏️ Brief</span>
-          <span className="text-gray-700">→</span>
-          <span className="bg-gray-900 border border-gray-700 px-3 py-1.5 rounded-lg">🤖 AI Generate</span>
-          <span className="text-gray-700">→</span>
-          <span className="bg-gray-900 border border-gray-700 px-3 py-1.5 rounded-lg">🛡️ Safety Filter</span>
-          <span className="text-gray-700">→</span>
-          <span className="bg-gray-900 border border-gray-700 px-3 py-1.5 rounded-lg">🚀 Auto-Post</span>
+        {/* ── Page header ─────────────────────────────────────────────────── */}
+        <div className="mb-6">
+          <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-pink-400 mb-1.5">
+            AI Social Media Manager
+          </p>
+          <h1 className="text-2xl font-bold text-gray-100 mb-1">Auto Posting</h1>
+          <p className="text-sm text-gray-500 max-w-xl">
+            Describe your content, choose platforms — the AI generates, safety-checks, and publishes automatically.
+          </p>
         </div>
 
-        {/* Tab bar */}
-        <div className="flex gap-1 mb-8 bg-gray-900 border border-gray-800 rounded-lg p-1 w-fit">
+        {/* ── Pipeline stage indicator (only when pipeline running or done) ── */}
+        {allDrafts.length > 0 && (
+          <div className="mb-5">
+            <StageIndicator stage={pipelineStage} />
+          </div>
+        )}
+
+        {/* ── Tab bar ─────────────────────────────────────────────────────── */}
+        <div className="flex gap-0.5 mb-6 bg-gray-900/80 border border-gray-800/70 rounded-lg p-1 w-fit">
           {tabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => dispatch({ type: "SET_ACTIVE_TAB", payload: tab.id })}
-              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              className={[
+                "flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-all duration-150",
                 state.activeTab === tab.id
-                  ? "bg-indigo-600 text-white"
-                  : "text-gray-400 hover:text-gray-200"
-              }`}
+                  ? "bg-indigo-600 text-white shadow-sm"
+                  : "text-gray-500 hover:text-gray-200",
+              ].join(" ")}
             >
               {tab.label}
               {tab.badge !== undefined && (
                 <span
-                  className={`text-xs px-1.5 py-0.5 rounded-full font-semibold ${
+                  className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
                     state.activeTab === tab.id
                       ? "bg-indigo-500 text-white"
-                      : "bg-gray-800 text-gray-400"
+                      : "bg-gray-800 text-gray-500"
                   }`}
                 >
                   {tab.badge}
@@ -473,25 +493,28 @@ export default function AutoPostingPage() {
           ))}
         </div>
 
-        {/* Error banner */}
+        {/* ── Error banner ────────────────────────────────────────────────── */}
         {state.error && (
-          <div className="mb-6 bg-red-900/40 border border-red-700 text-red-300 rounded-lg p-4 text-sm">
-            {state.error}
+          <div className="mb-5 bg-red-950/40 border border-red-800/50 text-red-300 rounded-xl px-4 py-3 text-sm flex items-start gap-2.5">
+            <span className="text-red-400 mt-0.5 flex-shrink-0">⚠</span>
+            <span>{state.error}</span>
           </div>
         )}
 
-        {/* ── SETUP TAB ── */}
+        {/* ── SETUP TAB ───────────────────────────────────────────────────── */}
         {state.activeTab === "setup" && (
           <BriefForm onGenerate={handleGenerateAndPost} loading={state.loading} />
         )}
 
-        {/* ── PIPELINE TAB ── */}
+        {/* ── PIPELINE TAB ────────────────────────────────────────────────── */}
         {state.activeTab === "pipeline" && (
           <div>
             {allDrafts.length === 0 ? (
-              <div className="bg-gray-900 border border-gray-700 rounded-xl p-8 text-center">
-                <p className="text-gray-400 text-sm mb-3">
-                  No pipeline running. Go to Setup to start.
+              // Empty pipeline state
+              <div className="border border-dashed border-gray-800 rounded-xl p-10 text-center">
+                <p className="text-gray-500 text-sm font-medium mb-1.5">No pipeline running</p>
+                <p className="text-gray-700 text-xs mb-4">
+                  Set up a brief to start generating content across your platforms.
                 </p>
                 <button
                   onClick={() => dispatch({ type: "SET_ACTIVE_TAB", payload: "setup" })}
@@ -502,26 +525,69 @@ export default function AutoPostingPage() {
               </div>
             ) : (
               <>
-                {/* Status summary */}
+                {/* In-progress status */}
                 {state.loading && inProgressCount > 0 && (
-                  <div className="flex items-center gap-2 mb-6 text-sm text-indigo-300">
-                    <span className="inline-block w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
+                  <div className="flex items-center gap-2 mb-4 text-sm text-indigo-300">
+                    <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse flex-shrink-0" />
                     Processing {inProgressCount} platform{inProgressCount !== 1 ? "s" : ""}…
                   </div>
                 )}
+
+                {/* Completion summary */}
                 {allTerminal && (
-                  <div className="flex items-center gap-2 mb-6 text-sm text-emerald-400">
-                    <span>✓</span>
-                    Pipeline complete — {allDrafts.filter((d) => d.status === "published").length} published,{" "}
-                    {allDrafts.filter((d) => d.status === "blocked").length} blocked,{" "}
-                    {allDrafts.filter((d) => d.status === "failed").length} failed
+                  <div className="mb-5 bg-gray-900 border border-gray-800/70 rounded-xl px-5 py-4 flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-200 mb-1">Pipeline complete</p>
+                      <div className="flex items-center gap-3">
+                        {publishedCount > 0 && (
+                          <span className="flex items-center gap-1.5 text-xs text-emerald-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                            {publishedCount} published
+                          </span>
+                        )}
+                        {blockedCount > 0 && (
+                          <span className="flex items-center gap-1.5 text-xs text-amber-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                            {blockedCount} safety blocked
+                          </span>
+                        )}
+                        {qaRejectedCount > 0 && (
+                          <span className="flex items-center gap-1.5 text-xs text-purple-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-purple-500" />
+                            {qaRejectedCount} QA rejected
+                          </span>
+                        )}
+                        {noAccountCount > 0 && (
+                          <span className="flex items-center gap-1.5 text-xs text-sky-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-sky-500" />
+                            {noAccountCount} no account
+                          </span>
+                        )}
+                        {failedCount > 0 && (
+                          <span className="flex items-center gap-1.5 text-xs text-red-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                            {failedCount} failed
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => dispatch({ type: "CLEAR_BRIEF" })}
+                      className="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
+                    >
+                      + New Post
+                    </button>
                   </div>
                 )}
 
-                {/* Pipeline cards */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Platform cards grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {allDrafts.map((draft) => (
-                    <PipelineStatusCard key={draft.id} draft={draft} />
+                    <PipelineStatusCard
+                      key={draft.id}
+                      draft={draft}
+                      brief={state.currentBrief ?? undefined}
+                    />
                   ))}
                 </div>
               </>
@@ -529,21 +595,9 @@ export default function AutoPostingPage() {
           </div>
         )}
 
-        {/* ── HISTORY TAB ── */}
+        {/* ── HISTORY TAB ─────────────────────────────────────────────────── */}
         {state.activeTab === "history" && (
           <PostHistoryFeed history={state.history} />
-        )}
-
-        {/* New post CTA — only when pipeline is fully complete */}
-        {allTerminal && state.activeTab !== "setup" && (
-          <div className="mt-6 flex justify-end">
-            <button
-              onClick={() => dispatch({ type: "CLEAR_BRIEF" })}
-              className="text-sm text-gray-500 hover:text-gray-300 transition-colors"
-            >
-              + Start new post
-            </button>
-          </div>
         )}
       </div>
     </div>

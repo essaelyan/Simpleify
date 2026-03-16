@@ -1,11 +1,11 @@
-import axios from "axios";
+/**
+ * analytics.ts — Legacy thin wrappers superseded by agents.ts.
+ *
+ * These functions are kept for backward compatibility. Prefer importing
+ * getAnalyticsInsights / getGrowthStrategy from @/api/agents instead,
+ * which provide full TypeScript types and proper error handling.
+ */
 
-export async function getAnalyticsInsights(analyticsData: object) {
-  const { data } = await axios.post("/api/analytics-insights", { analyticsData });
-  return data;
-}
+import { getAnalyticsInsights, getGrowthStrategy } from "@/api/agents";
 
-export async function getGrowthStrategy(insights: object) {
-  const { data } = await axios.post("/api/growth-strategy", { insights });
-  return data;
-}
+export { getAnalyticsInsights, getGrowthStrategy };
