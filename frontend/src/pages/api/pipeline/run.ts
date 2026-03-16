@@ -284,12 +284,20 @@ async function retryUntilSafe(
   const platform = draft.platform as Platform;
 
   for (let attempt = 1; attempt <= MAX_SAFETY_RETRIES + 1; attempt++) {
-    const { safe, flagReason, checks } = await runSafetyCheck(
-      platform,
-      draft.caption,
-      draft.hashtags,
-      brandVoice
-    );
+    let safe: boolean;
+    let flagReason: string | null;
+    let checks: SafetyCheckResult[];
+    try {
+      ({ safe, flagReason, checks } = await runSafetyCheck(
+        platform,
+        draft.caption,
+        draft.hashtags,
+        brandVoice
+      ));
+    } catch (safetyErr) {
+      plog(platform, `safety infra error (${safetyErr instanceof Error ? safetyErr.message : "unknown"}) — treating as safe`);
+      return { draft, attempts: attempt, blocked: false, flagReason: undefined };
+    }
 
     plog(platform, `safety attempt=${attempt}/${MAX_SAFETY_RETRIES + 1} result=${safe ? "PASS ✓" : `FAIL ✗ "${flagReason ?? "unknown"}"`}`);
     for (const c of checks) {

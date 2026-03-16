@@ -82,8 +82,11 @@ export function parseSafetyCheckResponse(raw: string): {
   flagReason: string | null;
   severity: "low" | "medium" | "high" | null;
 } {
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
-  const parsed: { checks: SafetyCheckResult[] } = JSON.parse(cleaned);
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error("Safety check response contained no JSON object");
+  }
+  const parsed: { checks: SafetyCheckResult[] } = JSON.parse(jsonMatch[0]);
 
   if (!Array.isArray(parsed.checks) || parsed.checks.length !== 5) {
     throw new Error("Safety check response must contain exactly 5 checks.");
