@@ -30,14 +30,15 @@ model SocialPost {
 }
 
 model SocialAccount {
-  id            String    @id @default(cuid())
-  platform      String    @unique   // one account per platform
-  accessToken   String              // store securely in production
-  refreshToken  String?
-  expiresAt     DateTime?
-  accountHandle String?             // e.g. "@username" for display
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id             String    @id @default(cuid())
+  platform       String    @unique   // one account per platform
+  accessToken    String              // store securely in production
+  refreshToken   String?
+  expiresAt      DateTime?
+  accountHandle  String?             // human-readable display name (e.g. "Jane Smith")
+  platformUserId String?             // platform-specific member ID (e.g. LinkedIn sub / member ID)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   @@map("social_accounts")
 }

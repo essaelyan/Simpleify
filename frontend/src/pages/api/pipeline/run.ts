@@ -476,7 +476,7 @@ async function processPlatform(
   enrichedBrief: ContentBrief,
   brandVoice: BrandVoiceProfile | null,
   /** Null means no account is connected for this platform. */
-  account: { accessToken: string } | null,
+  account: { accessToken: string; authorUrn?: string } | null,
   mediaUrl: string,
   /** Captions of all other platforms in this batch — used for duplication detection. */
   otherPlatformCaptions: string[]
@@ -608,6 +608,7 @@ async function processPlatform(
       caption: safeDraft.caption,
       hashtags: safeDraft.hashtags,
       accessToken: account.accessToken,
+      authorUrn: account.authorUrn,
     });
 
     // ── 4e: Persist SocialPost ─────────────────────────────────────────────
@@ -805,9 +806,21 @@ export default async function handler(
     // receive null in processPlatform and are stored with status="no_account".
     log("── Step 3: Loading connected accounts ───────────────────────────────");
     const accounts = await prisma.socialAccount.findMany();
-    const accountByPlatform: Record<string, { accessToken: string }> = Object.fromEntries(
-      accounts.map((a) => [a.platform, { accessToken: a.accessToken }])
-    );
+    const accountByPlatform: Record<string, { accessToken: string; authorUrn?: string }> =
+      Object.fromEntries(
+        accounts.map((a) => [
+          a.platform,
+          {
+            accessToken: a.accessToken,
+            // Construct the LinkedIn author URN from the stored member ID.
+            // For other platforms this is undefined and has no effect.
+            authorUrn:
+              a.platform === "linkedin" && a.platformUserId
+                ? `urn:li:person:${a.platformUserId}`
+                : undefined,
+          },
+        ])
+      );
     log(`accounts found: [${accounts.map((a) => a.platform).join(", ") || "none"}]`);
 
     // ── Step 4: Per-platform agent chain ──────────────────────────────────────

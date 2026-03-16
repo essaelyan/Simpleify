@@ -34,6 +34,12 @@ export interface PublishInput {
   caption: string;
   hashtags: string[];
   accessToken?: string; // stored OAuth token; required when MOCK_MODE=false
+  /**
+   * LinkedIn only: urn:li:person:{memberId} — required by the ugcPosts API.
+   * Populated from SocialAccount.platformUserId by the pipeline.
+   * Falls back to the LINKEDIN_AUTHOR_URN env var when not provided.
+   */
+  authorUrn?: string;
 }
 
 export interface PublishResult {
@@ -107,18 +113,22 @@ async function publishToFacebook(
 async function publishToLinkedIn(
   caption: string,
   hashtags: string[],
-  accessToken: string
+  accessToken: string,
+  authorUrn?: string
 ): Promise<string> {
-  const authorUrn = process.env.LINKEDIN_AUTHOR_URN ?? "";
-  if (!authorUrn) {
+  // Prefer the URN stored in DB (passed from the pipeline via SocialAccount.platformUserId);
+  // fall back to the LINKEDIN_AUTHOR_URN env var for backward compatibility.
+  const resolvedUrn = authorUrn ?? process.env.LINKEDIN_AUTHOR_URN ?? "";
+  if (!resolvedUrn) {
     throw new Error(
-      "LINKEDIN_AUTHOR_URN is not configured. " +
-      "Set it in .env.local (local) or the deployment environment to publish to LinkedIn."
+      "LinkedIn author URN is not available. " +
+      "Connect your LinkedIn account via the Auto Posting page, " +
+      "or set LINKEDIN_AUTHOR_URN in your environment."
     );
   }
   const text = [caption, ...hashtags.map((h) => `#${h}`)].join(" ");
   const body = {
-    author: authorUrn,
+    author: resolvedUrn,
     lifecycleState: "PUBLISHED",
     specificContent: {
       "com.linkedin.ugc.ShareContent": {
@@ -303,7 +313,8 @@ export async function publishToSocialPlatform(
         platformPostId = await publishToLinkedIn(
           input.caption,
           input.hashtags,
-          token
+          token,
+          input.authorUrn
         );
         break;
       case "instagram":

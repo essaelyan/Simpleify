@@ -1,6 +1,7 @@
 // /api/pipeline/run is now the single source of truth for the Auto Posting workflow.
 // The UI is a pure presentation layer over the PipelineRunData it returns.
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
+import { useRouter } from "next/router";
 import type {
   AutoPostingAction,
   AutoPostingState,
@@ -13,6 +14,8 @@ import type {
 } from "@/types/autoPosting";
 import { runPipeline, fetchPostHistory } from "@/api/autoPosting";
 import { fetchLatestHints, processFeedbackRun } from "@/api/feedbackLoop";
+import { fetchConnectedAccounts } from "@/api/socialAccounts";
+import type { ConnectedAccount } from "@/pages/api/social/accounts";
 import { useOptimizationStore } from "@/store/optimizationStore";
 import BriefForm from "@/components/autoPosting/BriefForm";
 import PipelineStatusCard from "@/components/autoPosting/PipelineStatusCard";
@@ -217,6 +220,99 @@ function reducer(state: AutoPostingState, action: AutoPostingAction): AutoPostin
   }
 }
 
+// ─── Connected Accounts Panel ─────────────────────────────────────────────────
+
+const PLATFORM_ICONS: Record<string, string> = {
+  linkedin:  "in",
+  instagram: "ig",
+  facebook:  "fb",
+  twitter:   "tw",
+  tiktok:    "tt",
+};
+
+interface ConnectedAccountsPanelProps {
+  accounts: ConnectedAccount[];
+  oauthSuccess: boolean;
+  oauthError: string | null;
+}
+
+function ConnectedAccountsPanel({
+  accounts,
+  oauthSuccess,
+  oauthError,
+}: ConnectedAccountsPanelProps) {
+  const linkedIn = accounts.find((a) => a.platform === "linkedin");
+
+  return (
+    <div className="mb-6 bg-gray-900 border border-gray-800/70 rounded-xl px-5 py-4">
+      <p className="text-xs font-semibold uppercase tracking-widest text-gray-500 mb-3">
+        Connected Accounts
+      </p>
+
+      {/* OAuth feedback banners */}
+      {oauthSuccess && (
+        <div className="mb-3 flex items-center gap-2 text-xs text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 rounded-lg px-3 py-2">
+          <span className="text-emerald-400">✓</span>
+          LinkedIn connected successfully.
+        </div>
+      )}
+      {oauthError && (
+        <div className="mb-3 flex items-center gap-2 text-xs text-red-400 bg-red-950/40 border border-red-800/40 rounded-lg px-3 py-2">
+          <span>⚠</span>
+          {oauthError}
+        </div>
+      )}
+
+      {/* LinkedIn row */}
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          {/* Platform badge */}
+          <div className="w-8 h-8 rounded-lg bg-[#0077B5]/15 border border-[#0077B5]/30 flex items-center justify-center">
+            <span className="text-[10px] font-bold text-[#0077B5]">
+              {PLATFORM_ICONS["linkedin"]}
+            </span>
+          </div>
+          <div>
+            <p className="text-sm font-medium text-gray-200">LinkedIn</p>
+            {linkedIn ? (
+              <p className="text-xs text-emerald-400">
+                ● Connected
+                {linkedIn.accountHandle ? ` · ${linkedIn.accountHandle}` : ""}
+              </p>
+            ) : (
+              <p className="text-xs text-gray-600">○ Not connected</p>
+            )}
+          </div>
+        </div>
+
+        <a
+          href="/api/social/linkedin/start"
+          className={[
+            "flex-shrink-0 text-xs font-semibold px-3 py-1.5 rounded-lg border transition-colors",
+            linkedIn
+              ? "border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500"
+              : "border-indigo-600/60 bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600/20 hover:text-indigo-300",
+          ].join(" ")}
+        >
+          {linkedIn ? "Reconnect" : "Connect"}
+        </a>
+      </div>
+
+      {/* Publishing mode note — only shown when connected */}
+      {linkedIn && (
+        <p className="mt-3 text-[11px] text-gray-600 leading-relaxed">
+          To publish real posts, set{" "}
+          <code className="text-gray-500 bg-gray-800 px-1 rounded">
+            SOCIAL_PUBLISH_MOCK=false
+          </code>{" "}
+          in your environment. Until then, the pipeline runs in mock mode and
+          returns a simulated post ID.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ─── Live pipeline stage indicator ───────────────────────────────────────────
 
 type PipelineStage = "idle" | "generate" | "safety" | "publish" | "done";
@@ -285,10 +381,16 @@ const TERMINAL_STATES: PostStatus[] = ["published", "blocked", "qa_rejected", "n
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function AutoPostingPage() {
+  const router = useRouter();
   const [state, dispatch] = useReducer(reducer, initialState);
   const [feedbackPending, setFeedbackPending] = useState(false);
+  const [connectedAccounts, setConnectedAccounts] = useState<ConnectedAccount[]>([]);
+  const [oauthSuccess, setOauthSuccess] = useState(false);
+  const [oauthError, setOauthError] = useState<string | null>(null);
   const setHints = useOptimizationStore((s) => s.setHints);
   const lastFetchedAt = useOptimizationStore((s) => s.lastFetchedAt);
+  // Prevent double-run of the accounts loader in strict mode
+  const accountsLoaded = useRef(false);
 
   // ── On mount: sync latest DB snapshot into the store ─────────────────────
   useEffect(() => {
@@ -322,6 +424,36 @@ export default function AutoPostingPage() {
     loadHistory();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Load connected accounts + handle OAuth redirect result ────────────────
+  useEffect(() => {
+    if (!router.isReady) return;
+    if (accountsLoaded.current) return;
+    accountsLoaded.current = true;
+
+    const { linkedin_connected, linkedin_error } = router.query;
+
+    if (linkedin_connected) {
+      setOauthSuccess(true);
+      // Clear the query param so a refresh doesn't re-show the banner
+      void router.replace("/SocialMedia/AutoPosting", undefined, { shallow: true });
+    }
+    if (typeof linkedin_error === "string" && linkedin_error) {
+      setOauthError(linkedin_error);
+      void router.replace("/SocialMedia/AutoPosting", undefined, { shallow: true });
+    }
+
+    async function loadAccounts() {
+      try {
+        const accounts = await fetchConnectedAccounts();
+        setConnectedAccounts(accounts);
+      } catch {
+        // Non-critical
+      }
+    }
+    void loadAccounts();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.isReady]);
 
   // ── Derive allTerminalInEffect for the pipeline "done" state ─────────────
   // Used only for UI: stage indicator, completion summary, in-progress count.
@@ -516,7 +648,14 @@ export default function AutoPostingPage() {
 
         {/* ── SETUP TAB ───────────────────────────────────────────────────── */}
         {state.activeTab === "setup" && (
-          <BriefForm onGenerate={handleGenerateAndPost} loading={state.loading} />
+          <>
+            <ConnectedAccountsPanel
+              accounts={connectedAccounts}
+              oauthSuccess={oauthSuccess}
+              oauthError={oauthError}
+            />
+            <BriefForm onGenerate={handleGenerateAndPost} loading={state.loading} />
+          </>
         )}
 
         {/* ── PIPELINE TAB ────────────────────────────────────────────────── */}
@@ -574,6 +713,12 @@ export default function AutoPostingPage() {
                           <span className="flex items-center gap-1.5 text-xs text-sky-400">
                             <span className="w-1.5 h-1.5 rounded-full bg-sky-500" />
                             {noAccountCount} no account
+                            <a
+                              href="/api/social/linkedin/start"
+                              className="underline underline-offset-2 hover:text-sky-300 transition-colors"
+                            >
+                              → Connect
+                            </a>
                           </span>
                         )}
                         {failedCount > 0 && (
