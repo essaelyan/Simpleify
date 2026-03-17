@@ -16,6 +16,7 @@ import type { ApiResponse } from "@/types/api";
 import type { SocialPublishData } from "@/pages/api/social/publish";
 import type { PipelineRunData } from "@/pages/api/pipeline/run";
 import type { HistoryPost } from "@/pages/api/social/posts";
+import type { PublishNowData } from "@/pages/api/social/scheduled/publish-now";
 
 export async function generateContent(
   brief: ContentBrief
@@ -131,6 +132,23 @@ export async function runPipeline(req: {
 }
 
 /**
+ * Immediately publishes a scheduled post via POST /api/social/scheduled/publish-now.
+ *
+ * Throws on network/server errors.  Returns the result on publish success or
+ * publish failure (the route always returns 200 when the DB update succeeded).
+ */
+export async function publishNow(postId: string): Promise<PublishNowData> {
+  const { data } = await axios.post<ApiResponse<PublishNowData>>(
+    "/api/social/scheduled/publish-now",
+    { postId }
+  );
+  if (!data.success || !data.data) {
+    throw new Error(data.error?.message ?? "Publish now failed");
+  }
+  return data.data;
+}
+
+/**
  * Fetches recent post history from GET /api/social/posts and maps the
  * DB records to PlatformDraft objects suitable for the history panel.
  *
@@ -144,6 +162,7 @@ export async function fetchPostHistory(): Promise<PlatformDraft[]> {
 
   return data.data.posts.map((p): PlatformDraft => ({
     id: p.id,
+    postId: p.id,   // for history items, the draft id IS the DB post id
     platform: p.platform as Platform,
     caption: p.caption,
     hashtags: p.hashtags,

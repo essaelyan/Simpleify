@@ -2,8 +2,8 @@
  * GET /api/social/scheduled/process
  *
  * Finds all SocialPost records with postStatus = "scheduled" and
- * publishAt <= now(), then publishes each one via the social publishing
- * service and updates the record to "published" or "failed".
+ * publishAt <= now(), then publishes each one via the shared helper
+ * and updates the record to "published" or "failed".
  *
  * Invoked automatically by the Vercel cron defined in vercel.json.
  * Also safe to call manually — only due posts are processed.
@@ -13,8 +13,7 @@
  * Before publishing, each post is atomically claimed by updating
  * postStatus from "scheduled" → "processing" using updateMany with the
  * same WHERE condition.  If count === 0 another worker already claimed
- * the row; we skip it.  This prevents duplicate publishes even if two
- * cron invocations overlap.
+ * the row; we skip it.
  *
  * Auth
  * ────
@@ -28,8 +27,8 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import type { ApiResponse } from "@/types/api";
 import { ok, fail } from "@/lib/apiResponse";
 import { API_ERRORS } from "@/types/api";
-import { publishToSocialPlatform } from "@/services/socialPublisher";
-import type { Platform } from "@/types/autoPosting";
+import { publishScheduledPost, loadAccountByPlatform } from "@/lib/publishScheduledPost";
+import type { PublishHelperResult } from "@/lib/publishScheduledPost";
 import prisma from "@/lib/prisma";
 
 export interface ProcessedResult {
@@ -57,8 +56,6 @@ export default async function handler(
   }
 
   // ── CRON_SECRET auth ─────────────────────────────────────────────────────
-  // Vercel sets CRON_SECRET automatically and sends it as the Bearer token.
-  // When the secret is absent (local dev) any caller is allowed.
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret) {
     const auth = req.headers.authorization;
@@ -90,27 +87,13 @@ export default async function handler(
     }
 
     // ── 2. Load connected accounts once ──────────────────────────────────
-    const accounts = await prisma.socialAccount.findMany();
-    const accountByPlatform = Object.fromEntries(
-      accounts.map((a) => [
-        a.platform,
-        {
-          accessToken: a.accessToken,
-          authorUrn:
-            a.platform === "linkedin" && a.platformUserId
-              ? `urn:li:person:${a.platformUserId}`
-              : undefined,
-        },
-      ])
-    );
+    const accountByPlatform = await loadAccountByPlatform();
 
     const results: ProcessedResult[] = [];
     let skippedCount = 0;
 
     for (const post of duePosts) {
       // ── 3. Atomic claim — prevents double-publish ─────────────────────
-      // updateMany returns count = 0 if another worker already changed
-      // the status away from "scheduled".
       const claim = await prisma.socialPost.updateMany({
         where: { id: post.id, postStatus: "scheduled" },
         data: { postStatus: "processing" },
@@ -135,98 +118,10 @@ export default async function handler(
         `[scheduled/process] processing_post postId=${post.id} platform=${post.platform} publishAt=${post.publishAt?.toISOString()}`
       );
 
-      // ── 4. Check for connected account ───────────────────────────────
+      // ── 4. Publish via shared helper ──────────────────────────────────
       const account = accountByPlatform[post.platform] ?? null;
-
-      if (!account) {
-        await prisma.socialPost.update({
-          where: { id: post.id },
-          data: {
-            postStatus: "failed",
-            success: false,
-            flagReason: "No connected account at publish time",
-          },
-        });
-        console.log(
-          `[scheduled/process] publish_failure postId=${post.id} platform=${post.platform} reason="no_account"`
-        );
-        results.push({
-          postId: post.id,
-          platform: post.platform,
-          status: "failed",
-          platformPostId: null,
-          error: "No connected account at publish time",
-        });
-        continue;
-      }
-
-      // ── 5. Parse hashtags ─────────────────────────────────────────────
-      let hashtags: string[] = [];
-      try {
-        hashtags = JSON.parse(post.hashtags) as string[];
-      } catch {
-        // Malformed JSON — publish without hashtags
-      }
-
-      // ── 6. Publish ────────────────────────────────────────────────────
-      try {
-        const publishResult = await publishToSocialPlatform({
-          platform: post.platform as Platform,
-          media_url: post.mediaUrl ?? "",
-          caption: post.caption,
-          hashtags,
-          accessToken: account.accessToken,
-          authorUrn: account.authorUrn,
-        });
-
-        const finalStatus = publishResult.success ? "published" : "failed";
-        await prisma.socialPost.update({
-          where: { id: post.id },
-          data: {
-            postStatus: finalStatus,
-            success: publishResult.success,
-            platformPostId: publishResult.platform_post_id ?? null,
-          },
-        });
-
-        if (publishResult.success) {
-          console.log(
-            `[scheduled/process] publish_success postId=${post.id} platform=${post.platform} platformPostId=${publishResult.platform_post_id ?? "none"}`
-          );
-        } else {
-          console.log(
-            `[scheduled/process] publish_failure postId=${post.id} platform=${post.platform} reason="api_returned_failure"`
-          );
-        }
-
-        results.push({
-          postId: post.id,
-          platform: post.platform,
-          status: finalStatus,
-          platformPostId: publishResult.platform_post_id ?? null,
-          error: publishResult.success ? null : "Publish API returned failure",
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Publish error";
-        await prisma.socialPost.update({
-          where: { id: post.id },
-          data: {
-            postStatus: "failed",
-            success: false,
-            flagReason: message.slice(0, 255),
-          },
-        });
-        console.error(
-          `[scheduled/process] publish_failure postId=${post.id} platform=${post.platform} error="${message}"`
-        );
-        results.push({
-          postId: post.id,
-          platform: post.platform,
-          status: "failed",
-          platformPostId: null,
-          error: message,
-        });
-      }
+      const result = await publishScheduledPost(post, account);
+      results.push({ ...result });
     }
 
     const processedCount = results.filter((r) => r.status !== "skipped").length;

@@ -39,6 +39,13 @@ export type PostStatus =
 
 export interface PlatformDraft {
   id: string;
+  /**
+   * DB primary key of the SocialPost record (cuid).
+   * For pipeline-run drafts this is populated from PipelinePlatformResult.postId.
+   * For history drafts this is identical to `id` (fetched directly from the DB).
+   * Null for skeleton drafts created before the pipeline completes.
+   */
+  postId?: string | null;
   platform: Platform;
   caption: string;
   hashtags: string[];
@@ -218,7 +225,13 @@ export type AutoPostingAction =
   | { type: "PUBLISHING_STARTED"; payload: { draftId: string } }
   | { type: "PUBLISHING_SUCCESS"; payload: { draftId: string; publishedAt: string; mockPlatformPostId: string } }
   | { type: "PUBLISHING_FAILED"; payload: { draftId: string; errorMessage: string } }
-  | { type: "CLEAR_BRIEF" };
+  | { type: "CLEAR_BRIEF" }
+  /**
+   * Applies partial updates to a draft identified by draftId.
+   * Searches both currentBrief.drafts and history so publish-now from
+   * either the Pipeline or History tab updates the correct record.
+   */
+  | { type: "DRAFT_STATUS_UPDATED"; payload: { draftId: string; updates: Partial<PlatformDraft> } };
 
 export interface AutoPostingState {
   loading: boolean;

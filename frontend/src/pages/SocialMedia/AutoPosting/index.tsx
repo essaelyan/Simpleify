@@ -12,7 +12,7 @@ import type {
   PostBrief,
   PostStatus,
 } from "@/types/autoPosting";
-import { runPipeline, fetchPostHistory } from "@/api/autoPosting";
+import { runPipeline, fetchPostHistory, publishNow } from "@/api/autoPosting";
 import { fetchLatestHints, processFeedbackRun } from "@/api/feedbackLoop";
 import { fetchConnectedAccounts } from "@/api/socialAccounts";
 import type { ConnectedAccount } from "@/pages/api/social/accounts";
@@ -181,6 +181,7 @@ function reducer(state: AutoPostingState, action: AutoPostingAction): AutoPostin
 
         const uiStatus = mapPipelineStatus(result.status);
         updatedBrief = mutateDraft(updatedBrief, existing.id, {
+          postId: result.postId ?? null,
           caption: result.caption ?? existing.caption,
           hashtags: result.hashtags ?? existing.hashtags,
           status: uiStatus,
@@ -215,6 +216,19 @@ function reducer(state: AutoPostingState, action: AutoPostingAction): AutoPostin
 
     case "CLEAR_BRIEF":
       return { ...state, currentBrief: null, activeTab: "setup" };
+
+    // ── Publish-now result — updates draft in both pipeline and history ────
+    case "DRAFT_STATUS_UPDATED": {
+      const { draftId, updates } = action.payload;
+      let newBrief = state.currentBrief;
+      if (newBrief) {
+        newBrief = mutateDraft(newBrief, draftId, updates);
+      }
+      const newHistory = state.history.map((d) =>
+        d.id === draftId ? { ...d, ...updates } : d
+      );
+      return { ...state, currentBrief: newBrief, history: newHistory };
+    }
 
     default:
       return state;
@@ -562,6 +576,24 @@ export default function AutoPostingPage() {
     dispatch({ type: "SET_LOADING", payload: false });
   }
 
+  // ── Publish-now handler (called from PipelineStatusCard / PostHistoryFeed) ─
+  // Dispatches DRAFT_STATUS_UPDATED so both the Pipeline and History tabs
+  // reflect the new status immediately without a page reload.
+  function handlePublishNow(draftId: string, result: { status: "published" | "failed"; error: string | null }) {
+    dispatch({
+      type: "DRAFT_STATUS_UPDATED",
+      payload: {
+        draftId,
+        updates: {
+          status: result.status,
+          publishedAt: result.status === "published" ? new Date().toISOString() : null,
+          scheduledAt: null,
+          errorMessage: result.error,
+        },
+      },
+    });
+  }
+
   // ── Derived values ────────────────────────────────────────────────────────
 
   const allDrafts      = state.currentBrief?.drafts ?? [];
@@ -760,6 +792,7 @@ export default function AutoPostingPage() {
                       key={draft.id}
                       draft={draft}
                       brief={state.currentBrief ?? undefined}
+                      onPublishNow={(result) => handlePublishNow(draft.id, result)}
                     />
                   ))}
                 </div>
@@ -770,7 +803,10 @@ export default function AutoPostingPage() {
 
         {/* ── HISTORY TAB ─────────────────────────────────────────────────── */}
         {state.activeTab === "history" && (
-          <PostHistoryFeed history={state.history} />
+          <PostHistoryFeed
+            history={state.history}
+            onPublishNow={(draftId, result) => handlePublishNow(draftId, result)}
+          />
         )}
       </div>
     </div>

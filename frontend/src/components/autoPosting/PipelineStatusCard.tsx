@@ -1,12 +1,16 @@
 import { useState } from "react";
 import type { PlatformDraft, PostStatus, ContentBrief } from "@/types/autoPosting";
 import { PLATFORM_META } from "@/types/autoPosting";
+import { publishNow } from "@/api/autoPosting";
 import CaptionVariantsPanel from "./CaptionVariantsPanel";
 import HashtagResearchPanel from "./HashtagResearchPanel";
 
 interface PipelineStatusCardProps {
   draft: PlatformDraft;
   brief?: ContentBrief;
+  /** Called after a successful or failed publish-now attempt so the parent
+   *  can update reducer state without a page reload. */
+  onPublishNow?: (result: { status: "published" | "failed"; error: string | null }) => void;
 }
 
 // ─── Step types ───────────────────────────────────────────────────────────────
@@ -139,7 +143,7 @@ type ActivePanel = "variants" | "hashtags" | null;
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function PipelineStatusCard({ draft, brief }: PipelineStatusCardProps) {
+export default function PipelineStatusCard({ draft, brief, onPublishNow }: PipelineStatusCardProps) {
   const meta      = PLATFORM_META[draft.platform];
   const steps     = getSteps(draft.status);
   const pill      = STATUS_PILL[draft.status];
@@ -148,6 +152,26 @@ export default function PipelineStatusCard({ draft, brief }: PipelineStatusCardP
   const isMock    = !!draft.mockPlatformPostId;
 
   const [activePanel, setActivePanel] = useState<ActivePanel>(null);
+  const [publishNowState, setPublishNowState] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [publishNowError, setPublishNowError] = useState<string | null>(null);
+
+  async function handlePublishNow() {
+    const postId = draft.postId;
+    if (!postId) return;
+    setPublishNowState("loading");
+    setPublishNowError(null);
+    try {
+      const result = await publishNow(postId);
+      setPublishNowState(result.status === "published" ? "success" : "error");
+      if (result.status === "failed") setPublishNowError(result.error ?? "Publish failed");
+      onPublishNow?.({ status: result.status, error: result.error });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Publish failed";
+      setPublishNowState("error");
+      setPublishNowError(msg);
+      onPublishNow?.({ status: "failed", error: msg });
+    }
+  }
 
   function togglePanel(panel: ActivePanel) {
     setActivePanel((prev) => (prev === panel ? null : panel));
@@ -291,7 +315,7 @@ export default function PipelineStatusCard({ draft, brief }: PipelineStatusCardP
           </div>
         )}
 
-        {/* ── Scheduled — violet, shows when it will publish ── */}
+        {/* ── Scheduled — violet, shows when it will publish + Publish Now ── */}
         {draft.status === "scheduled" && (
           <div className="bg-violet-950/40 border border-violet-800/40 rounded-lg px-3 py-2.5">
             <div className="flex items-center gap-2 mb-1.5">
@@ -305,9 +329,43 @@ export default function PipelineStatusCard({ draft, brief }: PipelineStatusCardP
                 ? `Queued for ${new Date(draft.scheduledAt).toLocaleString()}`
                 : "Content queued for scheduled publishing."}
             </p>
-            <p className="text-[10px] text-violet-900/80 mt-1.5 italic">
-              Call <code className="text-violet-800">/api/social/scheduled/process</code> to publish due posts.
-            </p>
+
+            {/* Publish Now button */}
+            {draft.postId && (
+              <div className="mt-2.5">
+                {publishNowState === "success" ? (
+                  <p className="text-xs text-emerald-400 flex items-center gap-1.5">
+                    <span>✓</span> Published successfully
+                  </p>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      disabled={publishNowState === "loading"}
+                      onClick={handlePublishNow}
+                      className={[
+                        "flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg border transition-all duration-150",
+                        publishNowState === "loading"
+                          ? "bg-violet-800/20 border-violet-700/40 text-violet-500 cursor-not-allowed"
+                          : "bg-violet-700/20 border-violet-600/50 text-violet-300 hover:bg-violet-700/30 hover:border-violet-500/60",
+                      ].join(" ")}
+                    >
+                      {publishNowState === "loading" ? (
+                        <>
+                          <span className="inline-block w-3 h-3 border-2 border-violet-500/30 border-t-violet-400 rounded-full animate-spin" />
+                          Publishing…
+                        </>
+                      ) : (
+                        <>⚡ Publish Now</>
+                      )}
+                    </button>
+                    {publishNowState === "error" && publishNowError && (
+                      <p className="mt-1.5 text-[11px] text-red-400/80">⚠ {publishNowError}</p>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         )}
 
