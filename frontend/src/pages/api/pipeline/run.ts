@@ -56,6 +56,7 @@ import {
   buildSafetyCheckPrompt,
   parseSafetyCheckResponse,
   buildRegenerationHints,
+  sanitizePlatformFormatting,
 } from "@/services/safetyFilter";
 import { loadActiveBrandVoice, brandVoiceToPromptText } from "@/services/brandVoiceService";
 import { enrichBrief } from "@/services/briefEnrichmentAgent";
@@ -295,8 +296,23 @@ async function retryUntilSafe(
   blocked: boolean;
   flagReason: string | undefined;
 }> {
-  let draft = initialDraft;
-  const platform = draft.platform as Platform;
+  const platform = initialDraft.platform as Platform;
+
+  // ── Pre-sanitize: fix trivial formatting issues deterministically ────────────
+  // Deduplicates hashtags, caps to platform limit, strips inline caption hashtags.
+  // Runs once before the first LLM safety check so the agent never sees
+  // formatting violations that would otherwise trigger an expensive regeneration.
+  const sanitized = sanitizePlatformFormatting(platform, initialDraft.caption, initialDraft.hashtags);
+  let draft: GeneratedPlatformContent = sanitized.corrected
+    ? { ...initialDraft, caption: sanitized.caption, hashtags: sanitized.hashtags }
+    : initialDraft;
+
+  if (sanitized.corrected) {
+    plog(
+      platform,
+      `safety_autocorrect_applied corrected_hashtag_count=${draft.hashtags.length} corrections=[${sanitized.corrections.join(", ")}]`
+    );
+  }
 
   for (let attempt = 1; attempt <= MAX_SAFETY_RETRIES + 1; attempt++) {
     let safe: boolean;
@@ -323,14 +339,31 @@ async function retryUntilSafe(
 
     if (safe) return { draft, attempts: attempt, blocked: false, flagReason: undefined };
 
+    // ── Auto-correct path: skip LLM regeneration for low-severity platform_rules ──
+    // If every failure is a formatting-only platform_rules issue at low severity
+    // (e.g. hashtag count, duplicates, caption length within reason), the
+    // sanitizer above already applied all fixes it can. Regenerating with Opus
+    // would cost ~30-40 s without improving the content — skip it and proceed.
+    const failedChecks = checks.filter((c) => !c.passed);
+    const onlyLowPlatformRules = failedChecks.every(
+      (c) => c.category === "platform_rules" && c.severity === "low"
+    );
+    if (onlyLowPlatformRules) {
+      plog(
+        platform,
+        `skipped_regeneration_for_low_severity_platform_rule attempt=${attempt} — proceeding with sanitized draft`
+      );
+      return { draft, attempts: attempt, blocked: false, flagReason: undefined };
+    }
+
     if (attempt > MAX_SAFETY_RETRIES) {
       plog(platform, `safety BLOCKED after ${attempt} attempt(s)`);
       return { draft, attempts: attempt, blocked: true, flagReason: flagReason ?? undefined };
     }
 
-    // Inject failure hints and regenerate this platform only
-    const safetyFeedback = buildRegenerationHints(checks.filter((c) => !c.passed)) ?? "";
-    plog(platform, `safety RETRY attempt=${attempt} — injecting correction hints`);
+    // ── LLM regeneration path: real issues (profanity, spam, brand_voice, etc.) ──
+    const safetyFeedback = buildRegenerationHints(failedChecks) ?? "";
+    plog(platform, `safety RETRY attempt=${attempt} — injecting correction hints for non-formatting issues`);
 
     const retryBrief: ContentBrief = {
       ...brief,
