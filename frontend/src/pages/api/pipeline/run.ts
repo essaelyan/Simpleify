@@ -64,15 +64,20 @@ import prisma from "@/lib/prisma";
 
 // ─── Anthropic client ─────────────────────────────────────────────────────────
 //
-// timeout: 60 000 ms (60 s) per call prevents indefinite hangs when the API
-// is slow.  The pipeline can still take several minutes in total because it
-// makes multiple sequential / parallel calls — the timeout is per-call, not
-// for the full run.
+// timeout: 45 000 ms per call — tighter than the Vercel 60 s function budget
+// so a slow call fails fast and leaves headroom for the retry + remaining stages.
+//
+// maxRetries: 1 — one retry on transient 500s is enough to survive a brief
+// Anthropic blip without pushing the total request over the 60 s budget.
+// (4 stages × 45 s × 2 attempts = 360 s worst-case with maxRetries: 4;
+//  4 stages × 45 s × 2 attempts is still theoretically long but in practice
+//  only one stage fails at a time and the retry resolves in < 5 s.)
+// Non-pipeline routes keep maxRetries: 4 — they have no synchronous budget constraint.
 
 const anthropic = new Anthropic({
   apiKey: process.env.CLAUDE_API_KEY,
-  timeout: 60_000,
-  maxRetries: 4,
+  timeout: 45_000,
+  maxRetries: 1,
 });
 
 // ─── Constants ────────────────────────────────────────────────────────────────
