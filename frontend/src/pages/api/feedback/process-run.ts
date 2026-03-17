@@ -31,6 +31,7 @@ const anthropic = new Anthropic({
   apiKey: process.env.CLAUDE_API_KEY,
   // 55 s per-call limit — route has a 60 s Vercel maxDuration so we leave 5 s headroom
   timeout: 55_000,
+  maxRetries: 4,
 });
 
 // ─── Response type ────────────────────────────────────────────────────────────

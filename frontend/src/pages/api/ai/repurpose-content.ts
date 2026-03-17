@@ -30,7 +30,7 @@ import { ok, fail } from "@/lib/apiResponse";
 import { API_ERRORS } from "@/types/api";
 import { PLATFORMS, PLATFORM_META } from "@/types/autoPosting";
 
-const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY, maxRetries: 4 });
 
 type SourceType = "blog" | "youtube_transcript" | "podcast" | "article" | "other";
 

@@ -64,6 +64,10 @@ export interface PlatformDraft {
   // ContentCreator integration hooks (null until ContentCreator module is built)
   mediaUrl: string | null;
   mediaType: "image" | "video" | "carousel" | null;
+  /** Number of automatic retry attempts scheduled (0 = no retries yet). */
+  retryCount: number;
+  /** ISO timestamp of the next scheduled retry; null if no retry is pending. */
+  nextRetryAt: string | null;
 }
 
 export interface ContentBrief {

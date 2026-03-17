@@ -19,12 +19,15 @@ model SocialPost {
   mediaUrl        String?
   caption         String
   hashtags        String              // JSON-stringified string[]
-  postStatus      String              // "published" | "failed" | "safety_blocked" | "scheduled" | "qa_rejected" | "no_account"
+  postStatus      String              // "published" | "failed" | "safety_blocked" | "scheduled" | "qa_rejected" | "no_account" | "processing"
   success         Boolean
   platformPostId  String?
   safetyBlocked   Boolean   @default(false)
   flagReason      String?
   publishAt       DateTime?           // null = publish immediately; future = scheduled for this time
+  retryCount      Int       @default(0)      // number of retry attempts scheduled (0 = none yet)
+  lastError       String?                    // last publish error message (retry-eligible failures)
+  nextRetryAt     DateTime?                  // when the next retry should run; null = no retry pending
   createdAt       DateTime  @default(now())
 
   @@map("social_posts")

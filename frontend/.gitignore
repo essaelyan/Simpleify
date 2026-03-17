@@ -20,3 +20,5 @@ out/
 
 # TypeScript incremental build
 *.tsbuildinfo
+
+.vercel

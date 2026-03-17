@@ -14,7 +14,7 @@ import {
   parseOptimizationResponse,
 } from "@/services/feedbackLoop";
 
-const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY, maxRetries: 4 });
 
 export interface OptimizeContentData {
   hints: ContentOptimizationHints;

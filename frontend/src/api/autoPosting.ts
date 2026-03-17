@@ -177,5 +177,7 @@ export async function fetchPostHistory(): Promise<PlatformDraft[]> {
     qaVerdict: null,         // not stored in DB
     mediaUrl: null,
     mediaType: null,
+    retryCount: p.retryCount,
+    nextRetryAt: p.nextRetryAt,
   }));
 }

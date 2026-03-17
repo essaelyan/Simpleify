@@ -504,6 +504,8 @@ export default function AutoPostingPage() {
       qaVerdict: null,
       mediaUrl: null,
       mediaType: null,
+      retryCount: 0,
+      nextRetryAt: null,
     }));
 
     const postBrief: PostBrief = {

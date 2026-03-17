@@ -72,6 +72,7 @@ import prisma from "@/lib/prisma";
 const anthropic = new Anthropic({
   apiKey: process.env.CLAUDE_API_KEY,
   timeout: 60_000,
+  maxRetries: 4,
 });
 
 // ─── Constants ────────────────────────────────────────────────────────────────

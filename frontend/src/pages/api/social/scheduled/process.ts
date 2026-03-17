@@ -1,9 +1,13 @@
 /**
  * GET /api/social/scheduled/process
  *
- * Finds all SocialPost records with postStatus = "scheduled" and
- * publishAt <= now(), then publishes each one via the shared helper
- * and updates the record to "published" or "failed".
+ * Finds all SocialPost records that are due for publishing:
+ *   1. postStatus = "scheduled" and publishAt <= now()
+ *   2. postStatus = "failed" and nextRetryAt <= now()  (automatic retries)
+ *
+ * Each post is atomically claimed, published via the shared helper, and
+ * updated to "published" or "failed" (with the next retry scheduled when
+ * applicable).
  *
  * Invoked automatically by the Vercel cron defined in vercel.json.
  * Also safe to call manually — only due posts are processed.
@@ -11,8 +15,8 @@
  * Double-publish prevention
  * ─────────────────────────
  * Before publishing, each post is atomically claimed by updating
- * postStatus from "scheduled" → "processing" using updateMany with the
- * same WHERE condition.  If count === 0 another worker already claimed
+ * postStatus from its current value → "processing" using updateMany with
+ * the same WHERE condition.  If count === 0 another worker already claimed
  * the row; we skip it.
  *
  * Auth
@@ -27,8 +31,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import type { ApiResponse } from "@/types/api";
 import { ok, fail } from "@/lib/apiResponse";
 import { API_ERRORS } from "@/types/api";
-import { publishScheduledPost, loadAccountByPlatform } from "@/lib/publishScheduledPost";
-import type { PublishHelperResult } from "@/lib/publishScheduledPost";
+import { publishScheduledPost, loadAccountByPlatform, MAX_RETRIES } from "@/lib/publishScheduledPost";
 import prisma from "@/lib/prisma";
 
 export interface ProcessedResult {
@@ -37,6 +40,8 @@ export interface ProcessedResult {
   status: "published" | "failed" | "skipped";
   platformPostId: string | null;
   error: string | null;
+  retryScheduled: boolean;
+  nextRetryAt: string | null;
 }
 
 export interface ProcessScheduledData {
@@ -69,13 +74,23 @@ export default async function handler(
   const now = new Date();
 
   try {
-    // ── 1. Find all due scheduled posts ──────────────────────────────────
+    // ── 1. Find all due posts (new scheduled + retry-eligible failed) ──────
     const duePosts = await prisma.socialPost.findMany({
       where: {
-        postStatus: "scheduled",
-        publishAt: { lte: now },
+        OR: [
+          // Fresh scheduled posts
+          {
+            postStatus: "scheduled",
+            publishAt: { lte: now },
+          },
+          // Retry-eligible failed posts (nextRetryAt non-null and due)
+          {
+            postStatus: "failed",
+            nextRetryAt: { lte: now },
+          },
+        ],
       },
-      orderBy: { publishAt: "asc" },
+      orderBy: { createdAt: "asc" },
     });
 
     console.log(
@@ -93,9 +108,12 @@ export default async function handler(
     let skippedCount = 0;
 
     for (const post of duePosts) {
+      const isRetry = post.postStatus === "failed";
+
       // ── 3. Atomic claim — prevents double-publish ─────────────────────
+      // Claim by matching the current status so only one worker wins.
       const claim = await prisma.socialPost.updateMany({
-        where: { id: post.id, postStatus: "scheduled" },
+        where: { id: post.id, postStatus: post.postStatus },
         data: { postStatus: "processing" },
       });
 
@@ -110,18 +128,34 @@ export default async function handler(
           status: "skipped",
           platformPostId: null,
           error: null,
+          retryScheduled: false,
+          nextRetryAt: null,
         });
         continue;
       }
 
-      console.log(
-        `[scheduled/process] processing_post postId=${post.id} platform=${post.platform} publishAt=${post.publishAt?.toISOString()}`
-      );
+      if (isRetry) {
+        console.log(
+          `[scheduled/process] retry_attempt postId=${post.id} platform=${post.platform} attempt=${post.retryCount}/${MAX_RETRIES}`
+        );
+      } else {
+        console.log(
+          `[scheduled/process] processing_post postId=${post.id} platform=${post.platform} publishAt=${post.publishAt?.toISOString()}`
+        );
+      }
 
       // ── 4. Publish via shared helper ──────────────────────────────────
       const account = accountByPlatform[post.platform] ?? null;
       const result = await publishScheduledPost(post, account);
-      results.push({ ...result });
+      results.push({
+        postId: result.postId,
+        platform: result.platform,
+        status: result.status,
+        platformPostId: result.platformPostId,
+        error: result.error,
+        retryScheduled: result.retryScheduled,
+        nextRetryAt: result.nextRetryAt,
+      });
     }
 
     const processedCount = results.filter((r) => r.status !== "skipped").length;

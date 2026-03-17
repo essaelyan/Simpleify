@@ -136,9 +136,27 @@ function HistoryRow({
           </p>
         )}
 
-        {/* Publish error — red */}
-        {draft.status === "failed" && draft.errorMessage && (
-          <p className="text-xs text-red-400/70 mt-1.5">⚠ {draft.errorMessage}</p>
+        {/* Publish error + retry status — red / amber */}
+        {draft.status === "failed" && (
+          <div className="mt-1.5 space-y-1">
+            {draft.errorMessage && (
+              <p className="text-xs text-red-400/70">⚠ {draft.errorMessage}</p>
+            )}
+            {draft.nextRetryAt ? (
+              <p className="text-xs text-amber-400/70 flex items-center gap-1.5">
+                <span>↻</span>
+                <span>
+                  Retry {draft.retryCount}/3 · next attempt{" "}
+                  {new Date(draft.nextRetryAt).toLocaleString()}
+                </span>
+              </p>
+            ) : draft.retryCount >= 3 ? (
+              <p className="text-xs text-red-600/70 flex items-center gap-1.5">
+                <span>✕</span>
+                <span>All retries exhausted (3/3)</span>
+              </p>
+            ) : null}
+          </div>
         )}
 
         {/* Scheduled — Publish Now button */}

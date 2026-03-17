@@ -13,7 +13,7 @@ import {
   buildRegenerationHints,
 } from "@/services/safetyFilter";
 
-const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY, maxRetries: 4 });
 
 export default async function handler(
   req: NextApiRequest,

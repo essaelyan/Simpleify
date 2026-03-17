@@ -45,6 +45,10 @@ export interface HistoryPost {
   flagReason: string | null;
   /** Human-readable error description (status = "failed"). */
   errorMessage: string | null;
+  /** Number of retry attempts scheduled (0 = no retries yet). */
+  retryCount: number;
+  /** ISO timestamp of the next scheduled retry; null if no retry is pending. */
+  nextRetryAt: string | null;
 }
 
 interface PostsData {
@@ -71,8 +75,11 @@ export default async function handler(
         hashtags: true,
         postStatus: true,
         flagReason: true,
+        lastError: true,
         success: true,
         publishAt: true,
+        retryCount: true,
+        nextRetryAt: true,
         createdAt: true,
       },
     });
@@ -96,7 +103,9 @@ export default async function handler(
         publishedAt: uiStatus === "published" ? r.createdAt.toISOString() : null,
         scheduledAt: uiStatus === "scheduled" ? (r.publishAt?.toISOString() ?? null) : null,
         flagReason: uiStatus === "blocked" ? (r.flagReason ?? null) : null,
-        errorMessage: uiStatus === "failed" ? (r.flagReason ?? "Publish failed") : null,
+        errorMessage: uiStatus === "failed" ? (r.lastError ?? r.flagReason ?? "Publish failed") : null,
+        retryCount: r.retryCount,
+        nextRetryAt: r.nextRetryAt?.toISOString() ?? null,
       };
     });
 
